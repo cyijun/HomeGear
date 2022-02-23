@@ -1,13 +1,25 @@
 /**
-   @file HomeGear.ino
-   @author Chen Yijun
-   @brief
-   @version 0.1
-   @date 2022-02-06
-
-   @license GPLv3
-
-*/
+ *  @file HomeGear.ino
+ *  @author Chen Yijun
+ *  @brief
+ *  @version 1.0
+ *  @date 2022-02-23
+ *
+ *  Copyright 2022 Chen Yijun
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ */
 
 #include <Arduino.h>
 #include <assert.h>
@@ -27,17 +39,17 @@
 #define DEVICE_MODEL "HomeGear Scalable Hardware Stack"
 #define SOFTWARE_VERSION "HomeGear 1.0"
 
-#define THI_MODULE false
+#define THI_MODULE true
 #define IAQ_MODULE false
 #define IR_MODULE true
-#define RF_MODULE false
-#define ZGB_MODULE false
+#define RF_MODULE true
+#define ZGB_MODULE true
 
-#define SERIAL_DEBUG true
+#define SERIAL_DEBUG false
 
-#define IR_GREE_AC true
-#define IR_SINGFUN_FAN false
-#define RF_PHILIPS_FAN_LIGHT false
+#define IR_GREE_AC false
+#define IR_SINGFUN_FAN true
+#define RF_PHILIPS_FAN_LIGHT true
 
 //***** Basic *****
 
@@ -45,7 +57,7 @@
 const String chipId = String(ESP_getChipId(), HEX);
 char nodename[32];
 
-unsigned int measureInterval = 15;
+unsigned int timeDrivenPubInterval = 300;
 unsigned long lastPubMs;
 unsigned long startLoopMs;
 
@@ -78,20 +90,20 @@ String moduleList()
 //***** Modules *****
 
 HAMqttDiscoveryHandler hamdhHG(PLATFORM, HOMEGEAR_SERIAL_NUMBER, MANUFACTURER, DEVICE_MODEL, SOFTWARE_VERSION);
-const char* avt = hamdhHG.getAvailabilityTopic().c_str();
+const char *avt = hamdhHG.getAvailabilityTopic();
 
 #if THI_MODULE
 bool thimEvent = false;
 bool thimHasNewData = false;
 unsigned long lastReadTHIMs = 0;
 // SHTC3
-#include "SHTSensor.h"
-SHTSensor shtc3(SHTSensor::SHTC3);
+#include "SparkFun_SHTC3.h"
+SHTC3 shtc3;
 
 // BH1750*2
-#include "BH1750FVI.h"
-BH1750FVI bh1750_1(0x23);
-BH1750FVI bh1750_2(0x5C);
+#include <BH1750.h>
+BH1750 bh1750_1;
+BH1750 bh1750_2;
 
 float thim_temperature[2] = {-100, 1};
 float thim_humidity[2] = {-100, 1};
@@ -354,11 +366,9 @@ void modulesStart()
 #endif
 
 #if THI_MODULE
-	bh1750_1.powerOn();
-	bh1750_2.setContHighRes();
-	bh1750_1.powerOn();
-	bh1750_2.setContHighRes();
-	shtc3.init();
+	bh1750_1.begin(BH1750::ONE_TIME_HIGH_RES_MODE, 0x23);
+	bh1750_2.begin(BH1750::ONE_TIME_HIGH_RES_MODE, 0x5C);
+	shtc3.begin();
 #endif
 
 #if IAQ_MODULE
@@ -756,6 +766,10 @@ void pubSensorsData()
 #if THI_MODULE
 	if (thimHasNewData)
 	{
+		dataShift(thim_humidity);
+		dataShift(thim_temperature);
+		dataShift(thim_illuminance);
+
 		json["thim_temperature"] = String(thim_temperature[0]);
 		json["thim_humidity"] = String(thim_humidity[0]);
 		json["thim_illuminance"] = String(thim_illuminance[0]);
@@ -812,14 +826,26 @@ void loop()
 #if THI_MODULE
 	if (millis() - lastReadTHIMs > 2000) // read thi mod data to the arrays
 	{
-		thim_temperature[1] = shtc3.getTemperature();
-		thim_humidity[1] = shtc3.getHumidity();
+		shtc3.update();
+		if (shtc3.lastStatus == SHTC3_Status_Nominal)
+		{
+			thim_temperature[1] = shtc3.toDegC();
+			thim_humidity[1] = shtc3.toPercent();
+		}
 
-		bh1750_1.setTemperature(round(thim_temperature[1]));
-		bh1750_2.setTemperature(round(thim_temperature[1]));
-		float lux1 = bh1750_1.getLux();
-		float lux2 = bh1750_2.getLux();
-		thim_illuminance[1] = fmaxf(lux1, lux2);
+		int tempInt = round(thim_temperature[1]);
+		float tempFactor = 1.0f - (tempInt - 20.0f) * 0.0005f;
+
+		while ((!bh1750_1.measurementReady(true)) || (!bh1750_2.measurementReady(true)))
+		{
+			yield();
+		}
+		float lux1 = bh1750_1.readLightLevel();
+		float lux2 = bh1750_2.readLightLevel();
+
+		bh1750_1.configure(BH1750::ONE_TIME_HIGH_RES_MODE);
+		bh1750_2.configure(BH1750::ONE_TIME_HIGH_RES_MODE);
+		thim_illuminance[1] = fmaxf(lux1, lux2) * tempFactor;
 
 		if (abs(thim_temperature[0] - thim_temperature[1]) > 0.3 || abs(thim_humidity[0] - thim_humidity[1]) > 3 || abs(thim_illuminance[0] - thim_illuminance[1]) > 0.1 * thim_illuminance[0])
 		{
@@ -852,7 +878,7 @@ void loop()
 #endif
 
 	// time driven and event drivent public
-	if ((millis() - lastPubMs > measureInterval * 1000)
+	if ((millis() - lastPubMs > timeDrivenPubInterval * 1000)
 #if IAQ_MODULE
 		|| iaqmEvent
 #endif
