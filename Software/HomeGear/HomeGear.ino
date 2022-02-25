@@ -824,7 +824,7 @@ void loop()
 #if (THI_MODULE || IAQ_MODULE) // if there is sensor need to public
 
 #if THI_MODULE
-	if (millis() - lastReadTHIMs > 2000) // read thi mod data to the arrays
+	if (millis() - lastReadTHIMs > 2000 && bh1750_1.measurementReady(true) && bh1750_2.measurementReady(true)) // read thi mod data to the arrays
 	{
 		shtc3.update();
 		if (shtc3.lastStatus == SHTC3_Status_Nominal)
@@ -836,10 +836,6 @@ void loop()
 		int tempInt = round(thim_temperature[1]);
 		float tempFactor = 1.0f - (tempInt - 20.0f) * 0.0005f;
 
-		while ((!bh1750_1.measurementReady(true)) || (!bh1750_2.measurementReady(true)))
-		{
-			yield();
-		}
 		float lux1 = bh1750_1.readLightLevel();
 		float lux2 = bh1750_2.readLightLevel();
 
@@ -847,7 +843,7 @@ void loop()
 		bh1750_2.configure(BH1750::ONE_TIME_HIGH_RES_MODE);
 		thim_illuminance[1] = fmaxf(lux1, lux2) * tempFactor;
 
-		if (abs(thim_temperature[0] - thim_temperature[1]) > 0.3 || abs(thim_humidity[0] - thim_humidity[1]) > 3 || abs(thim_illuminance[0] - thim_illuminance[1]) > 0.1 * thim_illuminance[0])
+		if (abs(thim_temperature[0] - thim_temperature[1]) > 0.3 || abs(thim_humidity[0] - thim_humidity[1]) > 3)
 		{
 			thimEvent = true;
 		}
