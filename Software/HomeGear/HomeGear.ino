@@ -40,21 +40,40 @@
 #define SOFTWARE_VERSION "HomeGear 1.0"
 
 #define THI_MODULE true
-#define IAQ_MODULE false
+#define IAQ_MODULE true
 #define IR_MODULE true
-#define RF_MODULE true
+#define RF_MODULE false
 #define ZGB_MODULE true
 
-#define SERIAL_DEBUG false
+#define SERIAL_DEBUG true
 
 #define IR_GREE_AC false
-#define IR_SINGFUN_FAN true
-#define RF_PHILIPS_FAN_LIGHT true
+#define IR_SINGFUN_FAN false
+#define IR_MIDEA_AC false
+#define IR_COOLIX_AC true
+#define RF_PHILIPS_FAN_LIGHT false
 
 //***** Basic *****
+String uint64ToString(uint64_t input)
+{
+    String result = "";
+    uint8_t base = 16;
 
-#define ESP_getChipId() ((uint32_t)ESP.getEfuseMac())
-const String chipId = String(ESP_getChipId(), HEX);
+    do
+    {
+        char c = input % base;
+        input /= base;
+
+        if (c < 10)
+            c += '0';
+        else
+            c += 'A' - 10;
+        result = c + result;
+    } while (input);
+    return result;
+}
+#define ESP_getChipId() uint64ToString(ESP.getEfuseMac())
+const String chipId = ESP_getChipId();
 char nodename[32];
 
 unsigned int timeDrivenPubInterval = 300;
@@ -63,28 +82,28 @@ unsigned long startLoopMs;
 
 void dataShift(float data[2])
 {
-	data[0] = data[1];
+    data[0] = data[1];
 }
 
 String moduleList()
 {
-	String modList = " / ";
+    String modList = " / ";
 #if THI_MODULE
-	modList += "Temperature-Humidity-Illuminance Module / ";
+    modList += "Temperature-Humidity-Illuminance Module / ";
 #endif
 #if IAQ_MODULE
-	modList += "IAQ Module / ";
+    modList += "IAQ Module / ";
 #endif
 #if IR_MODULE
-	modList += "IR Module / ";
+    modList += "IR Module / ";
 #endif
 #if RF_MODULE
-	modList += "RF Module / ";
+    modList += "RF Module / ";
 #endif
 #if ZGB_MODULE
-	modList += "ZigBee Module / ";
+    modList += "ZigBee Module / ";
 #endif
-	return modList;
+    return modList;
 }
 
 //***** Modules *****
@@ -141,7 +160,54 @@ HAMqttDiscoveryHandler hamdhSF("homegear_ir", "00001", "SingFun", "SingFun Floor
 #include <ir_Gree.h>
 HAMqttDiscoveryHandler hamdhGree("homegear_ir", "ac001", "Gree", "Gree AC", SOFTWARE_VERSION, hamdhHG);
 IRGreeAC greeAC(kIrLed);
+
+void setGreeACDefaultState()
+{
+    greeAC.off();
+    greeAC.setFan(1);
+    // kGreeAuto, kGreeDry, kGreeCool, kGreeFan, kGreeHeat
+    greeAC.setMode(kGreeCool);
+    greeAC.setTemp(26); // 16-30C
+    greeAC.setSwingVertical(false, kGreeSwingAuto);
+    greeAC.setSwingHorizontal(false);
+    greeAC.setXFan(false);
+    greeAC.setLight(false);
+    greeAC.setSleep(false);
+    greeAC.setTurbo(false);
+}
 #endif
+
+#if IR_MIDEA_AC
+#include <ir_Midea.h>
+HAMqttDiscoveryHandler hamdhMidea("homegear_ir", "ac001", "Midea", "Midea AC", SOFTWARE_VERSION, hamdhHG);
+IRMideaAC mideaAC(kIrLed);
+
+void setMideaACDefaultState()
+{
+    mideaAC.off();
+    mideaAC.setFan(0);
+    mideaAC.setMode(kMideaACCool);
+    mideaAC.setTemp(26); // 16-30C
+    mideaAC.setSwingVToggle(false);
+    mideaAC.setTurboToggle(false);
+    mideaAC.setLightToggle(false);
+    mideaAC.setQuiet(false);
+    mideaAC.setSleep(false);
+}
+#endif
+
+#if IR_COOLIX_AC
+#include <ir_Coolix.h>
+HAMqttDiscoveryHandler hamdhCoolix("homegear_ir", "ac001", "Coolix", "Coolix AC", SOFTWARE_VERSION, hamdhHG);
+IRCoolixAC coolixAC(kIrLed);
+
+void setCoolixACDefaultState()
+{
+    coolixAC.off();
+    coolixAC.setTemp(26); // 16-30C
+}
+#endif
+
 #endif
 
 #if RF_MODULE
@@ -155,12 +221,12 @@ HAMqttDiscoveryHandler hamdhPFL("homegear_rf", "00001", "Philips", "Philips RF R
 #include "RF_Code.h"
 void sendRfSig(const unsigned char data[6])
 {
-	rfSerial.write(rf_module_uart_protocol[0]);
-	for (int i = 0; i < 6; i++)
-	{
-		rfSerial.write(data[i]);
-	}
-	rfSerial.write(rf_module_uart_protocol[1]);
+    rfSerial.write(rf_module_uart_protocol[0]);
+    for (int i = 0; i < 6; i++)
+    {
+        rfSerial.write(data[i]);
+    }
+    rfSerial.write(rf_module_uart_protocol[1]);
 }
 #endif
 
@@ -206,341 +272,365 @@ bool shouldSaveConfig = false;
 // callback notifying us of the need to save config
 void saveConfigCallback()
 {
-	Serial.println("Should save config");
-	shouldSaveConfig = true;
+    Serial.println("Should save config");
+    shouldSaveConfig = true;
 }
 
 void loadConfigFromFS()
 {
-	// clean FS, for testing
-	// SPIFFS.format();
+    // clean FS, for testing
+    // SPIFFS.format();
 
-	// read configuration from FS json
-	Serial.println("mounting FS...");
+    // read configuration from FS json
+    Serial.println("mounting FS...");
 
-	if (SPIFFS.begin())
-	{
-		Serial.println("mounted file system");
-		if (SPIFFS.exists("/config.json"))
-		{
-			// file exists, reading and loading
-			Serial.println("reading config file");
-			File configFile = SPIFFS.open("/config.json", "r");
-			if (configFile)
-			{
-				Serial.println("opened config file");
-				size_t size = configFile.size();
-				// Allocate a buffer to store contents of the file.
-				std::unique_ptr<char[]> buf(new char[size]);
+    if (SPIFFS.begin())
+    {
+        Serial.println("mounted file system");
+        if (SPIFFS.exists("/config.json"))
+        {
+            // file exists, reading and loading
+            Serial.println("reading config file");
+            File configFile = SPIFFS.open("/config.json", "r");
+            if (configFile)
+            {
+                Serial.println("opened config file");
+                size_t size = configFile.size();
+                // Allocate a buffer to store contents of the file.
+                std::unique_ptr<char[]> buf(new char[size]);
 
-				configFile.readBytes(buf.get(), size);
+                configFile.readBytes(buf.get(), size);
 
-				DynamicJsonDocument json(1024);
-				auto deserializeError = deserializeJson(json, buf.get());
-				serializeJson(json, Serial);
-				if (!deserializeError)
-				{
-					// glob_copy_to_json
-					strcpy(mqtt_server, json["mqtt_server"]);
-					strcpy(mqtt_port, json["mqtt_port"]);
-					strcpy(mqtt_user, json["mqtt_user"]);
-					strcpy(mqtt_pwd, json["mqtt_pwd"]);
-					strcpy(homeassistant_server, json["homeassistant_server"]);
-					strcpy(homeassistant_port, json["homeassistant_port"]);
-					strcpy(homeassistant_token, json["homeassistant_token"]);
-				}
-				else
-				{
-					Serial.println("failed to load json config");
-				}
-				configFile.close();
-			}
-		}
-	}
-	else
-	{
-		Serial.println("failed to mount FS, formating");
-		SPIFFS.format();
-	}
-	// end read
+                DynamicJsonDocument json(1024);
+                auto deserializeError = deserializeJson(json, buf.get());
+                serializeJson(json, Serial);
+                if (!deserializeError)
+                {
+                    // glob_copy_to_json
+                    strcpy(mqtt_server, json["mqtt_server"]);
+                    strcpy(mqtt_port, json["mqtt_port"]);
+                    strcpy(mqtt_user, json["mqtt_user"]);
+                    strcpy(mqtt_pwd, json["mqtt_pwd"]);
+                    strcpy(homeassistant_server, json["homeassistant_server"]);
+                    strcpy(homeassistant_port, json["homeassistant_port"]);
+                    strcpy(homeassistant_token, json["homeassistant_token"]);
+                }
+                else
+                {
+                    Serial.println("failed to load json config");
+                }
+                configFile.close();
+            }
+        }
+        else
+        {
+            Serial.println("no config file");
+        }
+    }
+    else
+    {
+        Serial.println("failed to mount FS, may need formatting");
+        //SPIFFS.format();
+    }
+    // end read
 }
 
 void saveConfigToFS()
 {
-	// save the custom parameters to FS
-	if (shouldSaveConfig)
-	{
-		Serial.println("saving config");
-		DynamicJsonDocument json(2048);
-		json["mqtt_server"] = mqtt_server;
-		json["mqtt_port"] = mqtt_port;
-		json["mqtt_user"] = mqtt_user;
-		json["mqtt_pwd"] = mqtt_pwd;
-		json["homeassistant_server"] = homeassistant_server;
-		json["homeassistant_port"] = homeassistant_port;
-		json["homeassistant_token"] = homeassistant_token;
+    // save the custom parameters to FS
 
-		File configFile = SPIFFS.open("/config.json", "w");
-		if (!configFile)
-		{
-			Serial.println("failed to open config file for writing");
-		}
+    Serial.println("saving config");
+    DynamicJsonDocument json(2048);
+    json["mqtt_server"] = mqtt_server;
+    json["mqtt_port"] = mqtt_port;
+    json["mqtt_user"] = mqtt_user;
+    json["mqtt_pwd"] = mqtt_pwd;
+    json["homeassistant_server"] = homeassistant_server;
+    json["homeassistant_port"] = homeassistant_port;
+    json["homeassistant_token"] = homeassistant_token;
 
-		serializeJson(json, configFile);
-		configFile.close();
-		// end save
-	}
+    File configFile = SPIFFS.open("/config.json", "w");
+    if (!configFile)
+    {
+        Serial.println("failed to open config file for writing");
+    }
+
+    serializeJson(json, configFile);
+    configFile.close();
+    // end save
 }
 
 void wmStart()
 {
-	// The extra parameters to be configured (can be either global or just in the setup)
-	// After connecting, parameter.getValue() will get you the configured value
-	// id/name placeholder/prompt default length
-	WiFiManagerParameter custom_mqtt_server("mqttserver", "MQTT Server", mqtt_server, SERVER_ADDR_LEN);
-	WiFiManagerParameter custom_mqtt_port("mqttport", "MQTT Port", mqtt_port, NW_PORT_LEN);
-	WiFiManagerParameter custom_mqtt_user("mqttuser", "MQTT Username", mqtt_user, USER_PWD_LEN);
-	WiFiManagerParameter custom_mqtt_pwd("mqttpwd", "MQTT Password", mqtt_pwd, USER_PWD_LEN);
-	WiFiManagerParameter custom_homeassistant_server("homeassistantserver", "Home Assistant Server", homeassistant_server, SERVER_ADDR_LEN);
-	WiFiManagerParameter custom_homeassistant_port("homeassistantport", "Home Assistant Port", homeassistant_port, NW_PORT_LEN);
-	WiFiManagerParameter custom_homeassistant_token("homeassistanttoken", "Home Assistant Token", homeassistant_token, 128);
+    // The extra parameters to be configured (can be either global or just in the setup)
+    // After connecting, parameter.getValue() will get you the configured value
+    // id/name placeholder/prompt default length
+    WiFiManagerParameter custom_mqtt_server("mqttserver", "MQTT Server", mqtt_server, SERVER_ADDR_LEN);
+    WiFiManagerParameter custom_mqtt_port("mqttport", "MQTT Port", mqtt_port, NW_PORT_LEN);
+    WiFiManagerParameter custom_mqtt_user("mqttuser", "MQTT Username", mqtt_user, USER_PWD_LEN);
+    WiFiManagerParameter custom_mqtt_pwd("mqttpwd", "MQTT Password", mqtt_pwd, USER_PWD_LEN);
+    WiFiManagerParameter custom_homeassistant_server("homeassistantserver", "Home Assistant Server", homeassistant_server, SERVER_ADDR_LEN);
+    WiFiManagerParameter custom_homeassistant_port("homeassistantport", "Home Assistant Port", homeassistant_port, NW_PORT_LEN);
+    WiFiManagerParameter custom_homeassistant_token("homeassistanttoken", "Home Assistant Token", homeassistant_token, 128);
 
-	// WiFiManager
-	// Local intialization. Once its business is done, there is no need to keep it around
-	WiFiManager wifiManager;
+    // WiFiManager
+    // Local intialization. Once its business is done, there is no need to keep it around
+    WiFiManager wifiManager;
 
-	// set config save notify callback
-	wifiManager.setSaveConfigCallback(saveConfigCallback);
+#if ZGB_MODULE
+    wifiManager.setHostname("HomeGear-ZigBee");
+#endif
 
-	// add all your parameters here
-	wifiManager.addParameter(&custom_mqtt_server);
-	wifiManager.addParameter(&custom_mqtt_port);
-	wifiManager.addParameter(&custom_mqtt_user);
-	wifiManager.addParameter(&custom_mqtt_pwd);
-	wifiManager.addParameter(&custom_homeassistant_server);
-	wifiManager.addParameter(&custom_homeassistant_port);
-	wifiManager.addParameter(&custom_homeassistant_token);
+    // set config save notify callback
+    wifiManager.setSaveConfigCallback(saveConfigCallback);
 
-	// reset settings - for testing
-	// wifiManager.resetSettings();
+    // add all your parameters here
+    wifiManager.addParameter(&custom_mqtt_server);
+    wifiManager.addParameter(&custom_mqtt_port);
+    wifiManager.addParameter(&custom_mqtt_user);
+    wifiManager.addParameter(&custom_mqtt_pwd);
+    wifiManager.addParameter(&custom_homeassistant_server);
+    wifiManager.addParameter(&custom_homeassistant_port);
+    wifiManager.addParameter(&custom_homeassistant_token);
 
-	if (!wifiManager.autoConnect(nodename, "homegearconfig"))
-	{
-		Serial.println("failed to connect and hit timeout");
-		delay(3000);
-		// reset and try again, or maybe put it to deep sleep
-		ESP.restart();
-		delay(5000);
-	}
+    // reset settings - for testing
+    // wifiManager.resetSettings();
 
-	// if you get here you have connected to the WiFi
-	Serial.println("connected...yeey :)");
+    if (!wifiManager.autoConnect(nodename, "homegearconfig"))
+    {
+        Serial.println("failed to connect and hit timeout");
+        delay(3000);
+        // reset and try again, or maybe put it to deep sleep
+        ESP.restart();
+        delay(5000);
+    }
 
-	// read updated parameters
-	strcpy(mqtt_server, custom_mqtt_server.getValue());
-	strcpy(mqtt_port, custom_mqtt_port.getValue());
-	strcpy(mqtt_user, custom_mqtt_user.getValue());
-	strcpy(mqtt_pwd, custom_mqtt_pwd.getValue());
-	strcpy(homeassistant_server, custom_homeassistant_server.getValue());
-	strcpy(homeassistant_port, custom_homeassistant_port.getValue());
-	strcpy(homeassistant_token, custom_homeassistant_token.getValue());
+    // if you get here you have connected to the WiFi
+    Serial.println("connected...yeey :)");
+
+    // read updated parameters
+    strcpy(mqtt_server, custom_mqtt_server.getValue());
+    strcpy(mqtt_port, custom_mqtt_port.getValue());
+    strcpy(mqtt_user, custom_mqtt_user.getValue());
+    strcpy(mqtt_pwd, custom_mqtt_pwd.getValue());
+    strcpy(homeassistant_server, custom_homeassistant_server.getValue());
+    strcpy(homeassistant_port, custom_homeassistant_port.getValue());
+    strcpy(homeassistant_token, custom_homeassistant_token.getValue());
 }
 
 void mqttStart()
 {
-	mqttClient.setMaxPacketSize(2048);
+    mqttClient.setMaxPacketSize(2048);
 #if SERIAL_DEBUG
-	mqttClient.enableDebuggingMessages();
+    mqttClient.enableDebuggingMessages();
 #endif
-	mqttClient.enableHTTPWebUpdater("admin", "homegearota", "/ota");
-	mqttClient.enableLastWillMessage(avt, "offline", true);
-	// Set the WiFi and MQTT information that we loaded from global param
-	mqttClient.setMqttClientName(nodename);
-	mqttClient.setMqttServer(mqtt_server, mqtt_user, mqtt_pwd, atoi(mqtt_port));
+    mqttClient.enableHTTPWebUpdater("admin", "homegearota", "/ota");
+    mqttClient.enableLastWillMessage(avt, "offline", true);
+    // Set the WiFi and MQTT information that we loaded from global param
+    mqttClient.setMqttClientName(nodename);
+    mqttClient.setMqttServer(mqtt_server, mqtt_user, mqtt_pwd, atoi(mqtt_port));
 }
 
 void modulesStart()
 {
 #if (THI_MODULE || IAQ_MODULE)
-	Wire.begin();
+    Wire.begin();
 #endif
 
 #if THI_MODULE
-	bh1750_1.begin(BH1750::ONE_TIME_HIGH_RES_MODE, 0x23);
-	bh1750_2.begin(BH1750::ONE_TIME_HIGH_RES_MODE, 0x5C);
-	shtc3.begin();
+    bh1750_1.begin(BH1750::ONE_TIME_HIGH_RES_MODE, 0x23);
+    bh1750_2.begin(BH1750::ONE_TIME_HIGH_RES_MODE, 0x5C);
+    shtc3.begin();
 #endif
 
 #if IAQ_MODULE
-	bme680.begin(BME680_I2C_ADDR_PRIMARY, Wire);
-	bsec_virtual_sensor_t bme680SenseList[6] = {
-		BSEC_OUTPUT_RAW_PRESSURE,
-		BSEC_OUTPUT_STATIC_IAQ,
-		BSEC_OUTPUT_CO2_EQUIVALENT,
-		BSEC_OUTPUT_BREATH_VOC_EQUIVALENT,
-		BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_TEMPERATURE,
-		BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_HUMIDITY,
-	};
+    bme680.begin(BME680_I2C_ADDR_PRIMARY, Wire);
+    bsec_virtual_sensor_t bme680SenseList[6] = {
+        BSEC_OUTPUT_RAW_PRESSURE,
+        BSEC_OUTPUT_STATIC_IAQ,
+        BSEC_OUTPUT_CO2_EQUIVALENT,
+        BSEC_OUTPUT_BREATH_VOC_EQUIVALENT,
+        BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_TEMPERATURE,
+        BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_HUMIDITY,
+    };
 
-	bme680.updateSubscription(bme680SenseList, 6, BSEC_SAMPLE_RATE_LP);
+    bme680.updateSubscription(bme680SenseList, 6, BSEC_SAMPLE_RATE_LP);
 #endif
 
 #if IR_MODULE
-	irsend.begin();
+    irsend.begin();
 #if IR_GREE_AC
-	greeAC.begin();
-	greeAC.off();
-	greeAC.setFan(1);
-	// kGreeAuto, kGreeDry, kGreeCool, kGreeFan, kGreeHeat
-	greeAC.setMode(kGreeCool);
-	greeAC.setTemp(26); // 16-30C
-	greeAC.setSwingVertical(false, kGreeSwingAuto);
-	greeAC.setSwingHorizontal(false);
-	greeAC.setXFan(false);
-	greeAC.setLight(false);
-	greeAC.setSleep(false);
-	greeAC.setTurbo(false);
+    greeAC.begin();
+
+#endif
+#if IR_MIDEA_AC
+    mideaAC.begin();
+
+#endif
+#if IR_COOLIX_AC
+    coolixAC.begin();
+
 #endif
 #endif
 
 #if RF_MODULE
-	rfSerial.begin(9600, SERIAL_8N1, 13, 12);
+    rfSerial.begin(115200, SERIAL_8N1, 13, 12);
 #endif
 
 #if ZGB_MODULE
-	zgbSerial.begin(115200);
-	ser2NetServer.begin();
+    zgbSerial.begin(115200);
+    ser2NetServer.begin();
 #endif
 }
 
 void setup()
 {
-	// device name
-	Serial.begin(115200);
-	Serial.println();
+    // device name
+    Serial.begin(115200);
+    Serial.println();
 
-	String nodenameStr = "HomeGear_" + chipId;
-	nodenameStr.toUpperCase();
-	strcpy(nodename, nodenameStr.c_str());
+    String nodenameStr = "HomeGear_" + chipId;
+    nodenameStr.toUpperCase();
+    strcpy(nodename, nodenameStr.c_str());
 
-	loadConfigFromFS();
-	wmStart();
-	saveConfigToFS();
-	mqttStart();
-	modulesStart();
+    loadConfigFromFS();
+    wmStart();
+    if (shouldSaveConfig)
+    {
+        saveConfigToFS();
+    }
+    mqttStart();
+    modulesStart();
 
-	startLoopMs = millis();
-	lastPubMs = millis();
+    startLoopMs = millis();
+    lastPubMs = millis();
 }
 
 void onConnectionEstablished()
 {
-	// Publish online message to availabilityTopic
-	mqttClient.publish(avt, "online", true);
+    // Publish online message to availabilityTopic
+    mqttClient.publish(avt, "online", true);
 
-	// Subscribe to cmdTopic
-	mqttClient.subscribe(hamdhHG.getCmdTopic(), [](const String &payload)
-						 {
-    if (payload.equals("restore"))
-    {
-      SPIFFS.format();
-      WiFi.disconnect(true);
-      ESP.restart();
-      delay(1000);
-    }
-    if (payload.equals("reboot"))
-    {
-      ESP.restart();
-      delay(1000);
-    } });
-
-	// publish HA MQTT Discovery messages
-#if (THI_MODULE || IAQ_MODULE)
-	HAMqttDiscoverySensor hamdhSensor(hamdhHG);
-#endif
-
+    // Subscribe to cmdTopic
+    mqttClient.subscribe(hamdhHG.getCmdTopic(), [](const String &payload)
+                         {
+                             if (payload.equals("restore"))
+                             {
+                                 SPIFFS.format();
+                                 WiFi.disconnect(true);
+                                 ESP.restart();
+                                 delay(1000);
+                             }
+                             else if (payload.equals("reboot"))
+                             {
+                                 ESP.restart();
+                                 delay(1000);
+                             }
+                             else if (payload.equals("pubdata"))
+                             {
 #if THI_MODULE
-	hamdhSensor.setDeviceClass("temperature");
-	hamdhSensor.setDeviceNameMin("thim_temperature");
-	hamdhSensor.setStateClass("measurement");
-	hamdhSensor.setUnitOfMeasurement("°C");
-	hamdhSensor.setValueTemplate("{{ value_json.thim_temperature }}");
-	hamdhSensor.construct();
-	mqttClient.publish(hamdhSensor.getMqttDiscoveryConfigTopic(), hamdhSensor.getMqttDiscoveryMesg(), true);
-
-	hamdhSensor.setDeviceClass("humidity");
-	hamdhSensor.setDeviceNameMin("thim_humidity");
-	hamdhSensor.setUnitOfMeasurement("%");
-	hamdhSensor.setValueTemplate("{{ value_json.thim_humidity }}");
-	hamdhSensor.construct();
-	mqttClient.publish(hamdhSensor.getMqttDiscoveryConfigTopic(), hamdhSensor.getMqttDiscoveryMesg(), true);
-
-	hamdhSensor.setDeviceClass("illuminance");
-	hamdhSensor.setDeviceNameMin("thim_illuminance");
-	hamdhSensor.setUnitOfMeasurement("lx");
-	hamdhSensor.setValueTemplate("{{ value_json.thim_illuminance }}");
-	hamdhSensor.construct();
-	mqttClient.publish(hamdhSensor.getMqttDiscoveryConfigTopic(), hamdhSensor.getMqttDiscoveryMesg(), true);
+                                 thimEvent = true;
 #endif
 
 #if IAQ_MODULE
-	hamdhSensor.setDeviceClass("temperature");
-	hamdhSensor.setDeviceNameMin("iaqm_temperature");
-	hamdhSensor.setStateClass("measurement");
-	hamdhSensor.setUnitOfMeasurement("°C");
-	hamdhSensor.setValueTemplate("{{ value_json.iaqm_temperature }}");
-	hamdhSensor.construct();
-	mqttClient.publish(hamdhSensor.getMqttDiscoveryConfigTopic(), hamdhSensor.getMqttDiscoveryMesg(), true);
+                                 iaqmEvent = true;
+#endif
+                             }
+#if RF_MODULE
+                             else if (payload.equals("setrfmodbaud115200"))
+                             {
+                                 sendRfSig(rf_module_set_baudrate_to_115200);
+                             }
+#endif
+                         });
 
-	hamdhSensor.setDeviceClass("humidity");
-	hamdhSensor.setDeviceNameMin("iaqm_humidity");
-	hamdhSensor.setUnitOfMeasurement("%");
-	hamdhSensor.setValueTemplate("{{ value_json.iaqm_humidity }}");
-	hamdhSensor.construct();
-	mqttClient.publish(hamdhSensor.getMqttDiscoveryConfigTopic(), hamdhSensor.getMqttDiscoveryMesg(), true);
+    // publish HA MQTT Discovery messages
+#if (THI_MODULE || IAQ_MODULE)
+    HAMqttDiscoverySensor hamdhSensor(hamdhHG);
+#endif
 
-	hamdhSensor.setDeviceClass("pressure");
-	hamdhSensor.setDeviceNameMin("iaqm_pressure");
-	hamdhSensor.setUnitOfMeasurement("Pa");
-	hamdhSensor.setValueTemplate("{{ value_json.iaqm_pressure }}");
-	hamdhSensor.construct();
-	mqttClient.publish(hamdhSensor.getMqttDiscoveryConfigTopic(), hamdhSensor.getMqttDiscoveryMesg(), true);
+#if THI_MODULE
+    hamdhSensor.setDeviceClass("temperature");
+    hamdhSensor.setDeviceNameMin("thim_temperature");
+    hamdhSensor.setStateClass("measurement");
+    hamdhSensor.setUnitOfMeasurement("°C");
+    hamdhSensor.setValueTemplate("{{ value_json.thim_temperature }}");
+    hamdhSensor.construct();
+    mqttClient.publish(hamdhSensor.getMqttDiscoveryConfigTopic(), hamdhSensor.getMqttDiscoveryMesg(), true);
 
-	hamdhSensor.setDeviceClass("aqi");
-	hamdhSensor.setDeviceNameMin("iaqm_iaq");
-	hamdhSensor.setUnitOfMeasurement("");
-	hamdhSensor.setValueTemplate("{{ value_json.iaqm_iaq }}");
-	hamdhSensor.construct();
-	mqttClient.publish(hamdhSensor.getMqttDiscoveryConfigTopic(), hamdhSensor.getMqttDiscoveryMesg(), true);
+    hamdhSensor.setDeviceClass("humidity");
+    hamdhSensor.setDeviceNameMin("thim_humidity");
+    hamdhSensor.setUnitOfMeasurement("%");
+    hamdhSensor.setValueTemplate("{{ value_json.thim_humidity }}");
+    hamdhSensor.construct();
+    mqttClient.publish(hamdhSensor.getMqttDiscoveryConfigTopic(), hamdhSensor.getMqttDiscoveryMesg(), true);
 
-	hamdhSensor.setDeviceClass("carbon_dioxide");
-	hamdhSensor.setDeviceNameMin("iaqm_co2Equivalent");
-	hamdhSensor.setUnitOfMeasurement("ppm");
-	hamdhSensor.setValueTemplate("{{ value_json.iaqm_co2Equivalent }}");
-	hamdhSensor.construct();
-	mqttClient.publish(hamdhSensor.getMqttDiscoveryConfigTopic(), hamdhSensor.getMqttDiscoveryMesg(), true);
+    hamdhSensor.setDeviceClass("illuminance");
+    hamdhSensor.setDeviceNameMin("thim_illuminance");
+    hamdhSensor.setUnitOfMeasurement("lx");
+    hamdhSensor.setValueTemplate("{{ value_json.thim_illuminance }}");
+    hamdhSensor.construct();
+    mqttClient.publish(hamdhSensor.getMqttDiscoveryConfigTopic(), hamdhSensor.getMqttDiscoveryMesg(), true);
+#endif
 
-	hamdhSensor.setDeviceClass("volatile_organic_compounds");
-	hamdhSensor.setDeviceNameMin("iaqm_breathVocEquivalent");
-	hamdhSensor.setUnitOfMeasurement("µg/m³");
-	hamdhSensor.setValueTemplate("{{ value_json.iaqm_breathVocEquivalent }}");
-	hamdhSensor.construct();
-	mqttClient.publish(hamdhSensor.getMqttDiscoveryConfigTopic(), hamdhSensor.getMqttDiscoveryMesg(), true);
+#if IAQ_MODULE
+    hamdhSensor.setDeviceClass("temperature");
+    hamdhSensor.setDeviceNameMin("iaqm_temperature");
+    hamdhSensor.setStateClass("measurement");
+    hamdhSensor.setUnitOfMeasurement("°C");
+    hamdhSensor.setValueTemplate("{{ value_json.iaqm_temperature }}");
+    hamdhSensor.construct();
+    mqttClient.publish(hamdhSensor.getMqttDiscoveryConfigTopic(), hamdhSensor.getMqttDiscoveryMesg(), true);
+
+    hamdhSensor.setDeviceClass("humidity");
+    hamdhSensor.setDeviceNameMin("iaqm_humidity");
+    hamdhSensor.setUnitOfMeasurement("%");
+    hamdhSensor.setValueTemplate("{{ value_json.iaqm_humidity }}");
+    hamdhSensor.construct();
+    mqttClient.publish(hamdhSensor.getMqttDiscoveryConfigTopic(), hamdhSensor.getMqttDiscoveryMesg(), true);
+
+    hamdhSensor.setDeviceClass("pressure");
+    hamdhSensor.setDeviceNameMin("iaqm_pressure");
+    hamdhSensor.setUnitOfMeasurement("Pa");
+    hamdhSensor.setValueTemplate("{{ value_json.iaqm_pressure }}");
+    hamdhSensor.construct();
+    mqttClient.publish(hamdhSensor.getMqttDiscoveryConfigTopic(), hamdhSensor.getMqttDiscoveryMesg(), true);
+
+    hamdhSensor.setDeviceClass("aqi");
+    hamdhSensor.setDeviceNameMin("iaqm_iaq");
+    hamdhSensor.setUnitOfMeasurement("");
+    hamdhSensor.setValueTemplate("{{ value_json.iaqm_iaq }}");
+    hamdhSensor.construct();
+    mqttClient.publish(hamdhSensor.getMqttDiscoveryConfigTopic(), hamdhSensor.getMqttDiscoveryMesg(), true);
+
+    hamdhSensor.setDeviceClass("carbon_dioxide");
+    hamdhSensor.setDeviceNameMin("iaqm_co2Equivalent");
+    hamdhSensor.setUnitOfMeasurement("ppm");
+    hamdhSensor.setValueTemplate("{{ value_json.iaqm_co2Equivalent }}");
+    hamdhSensor.construct();
+    mqttClient.publish(hamdhSensor.getMqttDiscoveryConfigTopic(), hamdhSensor.getMqttDiscoveryMesg(), true);
+
+    hamdhSensor.setDeviceClass("volatile_organic_compounds");
+    hamdhSensor.setDeviceNameMin("iaqm_breathVocEquivalent");
+    hamdhSensor.setUnitOfMeasurement("µg/m³");
+    hamdhSensor.setValueTemplate("{{ value_json.iaqm_breathVocEquivalent }}");
+    hamdhSensor.construct();
+    mqttClient.publish(hamdhSensor.getMqttDiscoveryConfigTopic(), hamdhSensor.getMqttDiscoveryMesg(), true);
 #endif
 
 #if IR_MODULE
 #if IR_SINGFUN_FAN
-	HAMqttDiscoveryFan hamdhSFF(hamdhSF);
-	hamdhSFF.setDeviceNameMin("IR_SINGFUN_FAN");
-	hamdhSFF.setCommandTemplate("{\"sff_state\": \"{{ value }}\"}");
-	hamdhSFF.setOscillationCommandTemplate("{\"sff_oscillation\": \"{{ value }}\"}");
-	hamdhSFF.setStateValueTemplate("{{value_json.sff_state}}");
-	hamdhSFF.setOscillationValueTemplate("{{value_json.sff_oscillation}}");
-	hamdhSFF.construct();
-	mqttClient.publish(hamdhSFF.getMqttDiscoveryConfigTopic(), hamdhSFF.getMqttDiscoveryMesg(), true);
+    HAMqttDiscoveryFan hamdhSFF(hamdhSF);
+    hamdhSFF.setDeviceNameMin("singfun_fan");
+    hamdhSFF.setCommandTemplate("{\"sff_state\": \"{{ value }}\"}");
+    hamdhSFF.setOscillationCommandTemplate("{\"sff_oscillation\": \"{{ value }}\"}");
+    hamdhSFF.setStateValueTemplate("{{value_json.sff_state}}");
+    hamdhSFF.setOscillationValueTemplate("{{value_json.sff_oscillation}}");
+    hamdhSFF.construct();
+    mqttClient.publish(hamdhSFF.getMqttDiscoveryConfigTopic(), hamdhSFF.getMqttDiscoveryMesg(), true);
 
-	mqttClient.subscribe(hamdhSFF.getCtrlTopic(), [](const String &payload)
-						 {
+    mqttClient.subscribe(hamdhSFF.getCtrlTopic(), [](const String &payload)
+                         {
     StaticJsonDocument<100> doc;
     if (deserializeJson(doc, payload) == ARDUINOJSON_NAMESPACE::DeserializationError::Code::Ok)
     {
@@ -564,37 +654,39 @@ void onConnectionEstablished()
     } });
 #endif
 #if IR_GREE_AC
-	HAMqttDiscoveryClimate hamdhGreeAC(hamdhGree);
-	hamdhGreeAC.setDeviceNameMin("gree_ac");
-	hamdhGreeAC.setModeCommandTemplate("{\"acgree_mode\": \"{{ value }}\"}");
-	hamdhGreeAC.setFanModeCommandTemplate("{\"acgree_fan_mode\": \"{{ value }}\"}");
-	hamdhGreeAC.setSwingModeCommandTemplate("{\"acgree_swing_mode\": \"{{ value }}\"}");
-	hamdhGreeAC.setTemperatureCommandTemplate("{\"acgree_temperature\": \"{{ value }}\"}");
-	hamdhGreeAC.setfanModeStateTemplate("{{ value_json.acgree_fan_mode }}");
-	hamdhGreeAC.setModeStateTemplate("{{ value_json.acgree_mode }}");
-	hamdhGreeAC.setSwingModeStateTemplate("{{ value_json.acgree_swing_mode }}");
-	hamdhGreeAC.setTemperatureStateTemplate("{{ value_json.acgree_temperature }}");
-	String modes[10] = {"auto", "cool", "dry", "fan_only", "heat", "off", "", "", "", ""};
-	String swingModes[10] = {"off", "vertical", "horizontal", "both", "", "", "", "", "", ""};
-	String fanModes[10] = {"low", "medium", "high", "", "", "", "", "", "", ""};
-	hamdhGreeAC.setModes(modes);
-	hamdhGreeAC.setSwingModes(swingModes);
-	hamdhGreeAC.setFanModes(fanModes);
+    HAMqttDiscoveryClimate hamdhGreeAC(hamdhGree);
+    hamdhGreeAC.setDeviceNameMin("gree_ac");
+    hamdhGreeAC.setModeCommandTemplate("{\"acgree_mode\": \"{{ value }}\"}");
+    hamdhGreeAC.setFanModeCommandTemplate("{\"acgree_fan_mode\": \"{{ value }}\"}");
+    hamdhGreeAC.setSwingModeCommandTemplate("{\"acgree_swing_mode\": \"{{ value }}\"}");
+    hamdhGreeAC.setTemperatureCommandTemplate("{\"acgree_temperature\": \"{{ value }}\"}");
+    hamdhGreeAC.setfanModeStateTemplate("{{ value_json.acgree_fan_mode }}");
+    hamdhGreeAC.setModeStateTemplate("{{ value_json.acgree_mode }}");
+    hamdhGreeAC.setSwingModeStateTemplate("{{ value_json.acgree_swing_mode }}");
+    hamdhGreeAC.setTemperatureStateTemplate("{{ value_json.acgree_temperature }}");
+    // String modes[10] = {"auto", "cool", "dry", "fan_only", "heat", "off", "", "", "", ""};
+    String modes[10] = {"auto", "cool", "dry", "fan_only", "off", "", "", "", "", ""};
+    String swingModes[10] = {"off", "vertical", "horizontal", "both", "", "", "", "", "", ""};
+    String fanModes[10] = {"low", "medium", "high", "", "", "", "", "", "", ""};
+    hamdhGreeAC.setModes(modes);
+    hamdhGreeAC.setSwingModes(swingModes);
+    hamdhGreeAC.setFanModes(fanModes);
 
-	hamdhGreeAC.construct();
-	mqttClient.publish(hamdhGreeAC.getMqttDiscoveryConfigTopic(), hamdhGreeAC.getMqttDiscoveryMesg(), true);
+    hamdhGreeAC.construct();
+    mqttClient.publish(hamdhGreeAC.getMqttDiscoveryConfigTopic(), hamdhGreeAC.getMqttDiscoveryMesg(), true);
 
-	StaticJsonDocument<100> greeACdefaultStateDoc;
-	String greeACdefaultState;
-	greeACdefaultStateDoc["acgree_mode"] = "off";
-	greeACdefaultStateDoc["acgree_fan_mode"] = "medium";
-	greeACdefaultStateDoc["acgree_swing_mode"] = "off";
-	greeACdefaultStateDoc["acgree_temperature"] = "26";
-	serializeJson(greeACdefaultStateDoc, greeACdefaultState);
-	mqttClient.publish(hamdhGreeAC.getStateTopic(), greeACdefaultState, true);
+    setGreeACDefaultState();
+    StaticJsonDocument<100> greeACdefaultStateDoc;
+    String greeACdefaultState;
+    greeACdefaultStateDoc["acgree_mode"] = "off";
+    greeACdefaultStateDoc["acgree_fan_mode"] = "medium";
+    greeACdefaultStateDoc["acgree_swing_mode"] = "off";
+    greeACdefaultStateDoc["acgree_temperature"] = "26";
+    serializeJson(greeACdefaultStateDoc, greeACdefaultState);
+    mqttClient.publish(hamdhGreeAC.getStateTopic(), greeACdefaultState, true);
 
-	mqttClient.subscribe(hamdhGreeAC.getCtrlTopic(), [](const String &payload)
-						 {
+    mqttClient.subscribe(hamdhGreeAC.getCtrlTopic(), [](const String &payload)
+                         {
     StaticJsonDocument<100> doc;
     if (deserializeJson(doc, payload) == ARDUINOJSON_NAMESPACE::DeserializationError::Code::Ok)
     {
@@ -675,32 +767,215 @@ void onConnectionEstablished()
       mqttClient.publish(hamdhGree.getStateTopic(), feedbackMesg, true);
     } });
 #endif
+
+#if IR_MIDEA_AC
+    HAMqttDiscoveryClimate hamdhMideaAC(hamdhMidea);
+    hamdhMideaAC.setDeviceNameMin("midea_ac");
+    hamdhMideaAC.setModeCommandTemplate("{\"acmidea_mode\": \"{{ value }}\"}");
+    hamdhMideaAC.setFanModeCommandTemplate("{\"acmidea_fan_mode\": \"{{ value }}\"}");
+    hamdhMideaAC.setSwingModeCommandTemplate("{\"acmidea_swing_mode\": \"{{ value }}\"}");
+    hamdhMideaAC.setTemperatureCommandTemplate("{\"acmidea_temperature\": \"{{ value }}\"}");
+    hamdhMideaAC.setfanModeStateTemplate("{{ value_json.acmidea_fan_mode }}");
+    hamdhMideaAC.setModeStateTemplate("{{ value_json.acmidea_mode }}");
+    hamdhMideaAC.setSwingModeStateTemplate("{{ value_json.acmidea_swing_mode }}");
+    hamdhMideaAC.setTemperatureStateTemplate("{{ value_json.acmidea_temperature }}");
+    String modes[10] = {"auto", "cool", "dry", "fan_only", "heat", "off", "", "", "", ""};
+    // String modes[10] = {"auto", "cool", "dry", "fan_only", "off", "", "", "", "", ""};
+    String swingModes[10] = {"off", "vertical", "", "", "", "", "", "", "", ""};
+    String fanModes[10] = {"low", "medium", "high", "auto", "", "", "", "", "", ""};
+    hamdhMideaAC.setModes(modes);
+    hamdhMideaAC.setSwingModes(swingModes);
+    hamdhMideaAC.setFanModes(fanModes);
+
+    hamdhMideaAC.construct();
+    mqttClient.publish(hamdhMideaAC.getMqttDiscoveryConfigTopic(), hamdhMideaAC.getMqttDiscoveryMesg(), true);
+
+    setMideaACDefaultState();
+    StaticJsonDocument<100> mideaACdefaultStateDoc;
+    String mideaACdefaultState;
+    mideaACdefaultStateDoc["acmidea_mode"] = "off";
+    mideaACdefaultStateDoc["acmidea_fan_mode"] = "medium";
+    mideaACdefaultStateDoc["acmidea_swing_mode"] = "off";
+    mideaACdefaultStateDoc["acmidea_temperature"] = "26";
+    serializeJson(mideaACdefaultStateDoc, mideaACdefaultState);
+    mqttClient.publish(hamdhMideaAC.getStateTopic(), mideaACdefaultState, true);
+
+    mqttClient.subscribe(hamdhMideaAC.getCtrlTopic(), [](const String &payload)
+                         {
+    StaticJsonDocument<100> doc;
+    if (deserializeJson(doc, payload) == ARDUINOJSON_NAMESPACE::DeserializationError::Code::Ok)
+    {
+      StaticJsonDocument<100> feedbackDoc;
+      String feedbackMesg;
+	  bool isOffCmd = false;
+      if (doc.containsKey("acmidea_mode"))
+      {
+        String mode = doc["acmidea_mode"];
+		mideaAC.on();
+        if (mode.equals("auto")) {
+          mideaAC.setMode(kMideaACAuto);
+        }
+        else if (mode.equals("cool")) {
+          mideaAC.setMode(kMideaACCool);
+        }
+        else if (mode.equals("dry")) {
+          mideaAC.setMode(kMideaACDry);
+        }
+        else if (mode.equals("fan_only")) {
+          mideaAC.setMode(kMideaACFan);
+        }
+        else if (mode.equals("heat")) {
+          mideaAC.setMode(kMideaACHeat);
+        }
+		else if (mode.equals("off")) {
+		  mideaAC.off();
+		  isOffCmd = true;
+		}
+        feedbackDoc["acmidea_mode"] = mode;
+      }
+      if (doc.containsKey("acmidea_fan_mode"))
+      {
+        String fanMode = doc["acmidea_fan_mode"];
+        if (fanMode.equals("low")) {
+          mideaAC.setFan(1);
+        }
+        else if (fanMode.equals("medium")) {
+          mideaAC.setFan(2);
+        }
+        else if (fanMode.equals("high")) {
+          mideaAC.setFan(3);
+        }
+        else if (fanMode.equals("auto")) {
+          mideaAC.setFan(0);
+        }
+        feedbackDoc["acmidea_fan_mode"] = fanMode;
+      }
+      if (doc.containsKey("acmidea_swing_mode"))
+      {
+        String swingMode = doc["acmidea_swing_mode"];
+        if (swingMode.equals("off")) {
+          mideaAC.setSwingVToggle(false);
+        }
+        else if (swingMode.equals("vertical")) {
+        mideaAC.setSwingVToggle(true);
+        }
+        feedbackDoc["acmidea_swing_mode"] = swingMode;
+      }
+      if (doc.containsKey("acmidea_temperature"))
+      {
+        String tempStr = doc["acmidea_temperature"];
+		float temp = tempStr.toFloat();
+        int target = round(temp);
+        mideaAC.setTemp(target);
+        feedbackDoc["acmidea_temperature"] = tempStr;
+      }
+	  if(isOffCmd || ((!isOffCmd) && mideaAC.getPower())){
+		  mideaAC.send();
+	  }
+      
+      serializeJson(feedbackDoc, feedbackMesg);
+      mqttClient.publish(hamdhMidea.getStateTopic(), feedbackMesg, true);
+    } });
+#endif
+
+#if IR_COOLIX_AC
+    HAMqttDiscoveryClimate hamdhCoolixAC(hamdhCoolix);
+    hamdhCoolixAC.setDeviceNameMin("coolix_ac");
+    hamdhCoolixAC.setModeCommandTemplate("{\"accoolix_mode\": \"{{ value }}\"}");
+    hamdhCoolixAC.setSwingModeCommandTemplate("{\"accoolix_swing_mode\": \"{{ value }}\"}");
+    hamdhCoolixAC.setTemperatureCommandTemplate("{\"accoolix_temperature\": \"{{ value }}\"}");
+    hamdhCoolixAC.setModeStateTemplate("{{ value_json.accoolix_mode }}");
+    hamdhCoolixAC.setSwingModeStateTemplate("{{ value_json.accoolix_swing_mode }}");
+    hamdhCoolixAC.setTemperatureStateTemplate("{{ value_json.accoolix_temperature }}");
+    String modes[10] = {"cool", "heat", "off", "", "", "", "", "", "", ""};
+    String swingModes[10] = {"off", "vertical", "", "", "", "", "", "", "", ""};
+    hamdhCoolixAC.setModes(modes);
+    hamdhCoolixAC.setSwingModes(swingModes);
+
+    hamdhCoolixAC.construct();
+    mqttClient.publish(hamdhCoolixAC.getMqttDiscoveryConfigTopic(), hamdhCoolixAC.getMqttDiscoveryMesg(), true);
+
+    setCoolixACDefaultState();
+    StaticJsonDocument<100> coolixACdefaultStateDoc;
+    String coolixACdefaultState;
+    coolixACdefaultStateDoc["accoolix_mode"] = "off";
+    coolixACdefaultStateDoc["accoolix_swing_mode"] = "off";
+    coolixACdefaultStateDoc["accoolix_temperature"] = "26";
+    serializeJson(coolixACdefaultStateDoc, coolixACdefaultState);
+    mqttClient.publish(hamdhCoolixAC.getStateTopic(), coolixACdefaultState, true);
+
+    mqttClient.subscribe(hamdhCoolixAC.getCtrlTopic(), [](const String &payload)
+                         {
+    StaticJsonDocument<100> doc;
+    if (deserializeJson(doc, payload) == ARDUINOJSON_NAMESPACE::DeserializationError::Code::Ok)
+    {
+      StaticJsonDocument<100> feedbackDoc;
+      String feedbackMesg;
+	  bool isOffCmd = false;
+      if (doc.containsKey("accoolix_mode"))
+      {
+        String mode = doc["accoolix_mode"];
+		coolixAC.on();
+        if (mode.equals("cool")) {
+          coolixAC.setMode(kCoolixCool);
+        }
+        else if (mode.equals("heat")) {
+          coolixAC.setMode(kCoolixHeat);
+        }
+		else if (mode.equals("off")) {
+		  coolixAC.off();
+		  isOffCmd = true;
+		}
+        feedbackDoc["accoolix_mode"] = mode;
+      }
+      if (doc.containsKey("accoolix_swing_mode"))
+      {
+        String swingMode = doc["accoolix_swing_mode"];
+        coolixAC.setSwing();
+        feedbackDoc["accoolix_swing_mode"] = swingMode;
+      }
+      if (doc.containsKey("accoolix_temperature"))
+      {
+        String tempStr = doc["accoolix_temperature"];
+		float temp = tempStr.toFloat();
+        int target = round(temp);
+        coolixAC.setTemp(target);
+        feedbackDoc["accoolix_temperature"] = tempStr;
+      }
+	  if(isOffCmd || ((!isOffCmd) && coolixAC.getPower())){
+	    coolixAC.send();
+	  }
+      
+      serializeJson(feedbackDoc, feedbackMesg);
+      mqttClient.publish(hamdhCoolix.getStateTopic(), feedbackMesg, true);
+    } });
+#endif
 #endif
 
 #if RF_MODULE
 #if RF_PHILIPS_FAN_LIGHT
-	HAMqttDiscoveryFan hamdhPFLF(hamdhPFL);
-	HAMqttDiscoveryLight hamdhPFLL(hamdhPFL);
+    HAMqttDiscoveryFan hamdhPFLF(hamdhPFL);
+    HAMqttDiscoveryLight hamdhPFLL(hamdhPFL);
 
-	hamdhPFLF.setDeviceNameMin("philips_fanlight_fan");
-	hamdhPFLF.setCommandTemplate("{\"pflf_state\": \"{{ value }}\"}");
-	hamdhPFLF.setPercentageCommandTemplate("{\"pflf_percentage\": {{ value }}}");
-	hamdhPFLF.setSpeedRangeMin(1);
-	hamdhPFLF.setSpeedRangeMax(3);
-	hamdhPFLF.setStateValueTemplate("{{value_json.pflf_state}}");
-	hamdhPFLF.setPercentageValueTemplate("{{value_json.pflf_percentage}}");
-	hamdhPFLF.construct();
-	mqttClient.publish(hamdhPFLF.getMqttDiscoveryConfigTopic(), hamdhPFLF.getMqttDiscoveryMesg(), true);
+    hamdhPFLF.setDeviceNameMin("philips_fanlight_fan");
+    hamdhPFLF.setCommandTemplate("{\"pflf_state\": \"{{ value }}\"}");
+    hamdhPFLF.setPercentageCommandTemplate("{\"pflf_percentage\": {{ value }}}");
+    hamdhPFLF.setSpeedRangeMin(1);
+    hamdhPFLF.setSpeedRangeMax(3);
+    hamdhPFLF.setStateValueTemplate("{{value_json.pflf_state}}");
+    hamdhPFLF.setPercentageValueTemplate("{{value_json.pflf_percentage}}");
+    hamdhPFLF.construct();
+    mqttClient.publish(hamdhPFLF.getMqttDiscoveryConfigTopic(), hamdhPFLF.getMqttDiscoveryMesg(), true);
 
-	hamdhPFLL.setDeviceNameMin("philips_fanlight_light");
-	hamdhPFLL.setPayloadOn("{\"pfll_state\":\"ON\"}");
-	hamdhPFLL.setPayloadOff("{\"pfll_state\":\"OFF\"}");
-	hamdhPFLL.setStateTemplate("{{ value_json.pfll_state }}");
-	hamdhPFLL.construct();
-	mqttClient.publish(hamdhPFLL.getMqttDiscoveryConfigTopic(), hamdhPFLL.getMqttDiscoveryMesg(), true);
+    hamdhPFLL.setDeviceNameMin("philips_fanlight_light");
+    hamdhPFLL.setPayloadOn("{\"pfll_state\":\"ON\"}");
+    hamdhPFLL.setPayloadOff("{\"pfll_state\":\"OFF\"}");
+    hamdhPFLL.setStateTemplate("{{ value_json.pfll_state }}");
+    hamdhPFLL.construct();
+    mqttClient.publish(hamdhPFLL.getMqttDiscoveryConfigTopic(), hamdhPFLL.getMqttDiscoveryMesg(), true);
 
-	mqttClient.subscribe(hamdhPFL.getCtrlTopic(), [](const String &payload)
-						 {
+    mqttClient.subscribe(hamdhPFL.getCtrlTopic(), [](const String &payload)
+                         {
     StaticJsonDocument<100> doc;
     if (deserializeJson(doc, payload) == ARDUINOJSON_NAMESPACE::DeserializationError::Code::Ok)
     {
@@ -761,219 +1036,222 @@ void onConnectionEstablished()
 void pubSensorsData()
 {
 
-	DynamicJsonDocument json(1024);
-	String pubPayload;
+    DynamicJsonDocument json(1024);
+    String pubPayload;
 #if THI_MODULE
-	if (thimHasNewData)
-	{
-		dataShift(thim_humidity);
-		dataShift(thim_temperature);
-		dataShift(thim_illuminance);
+    if (thimHasNewData)
+    {
+        dataShift(thim_humidity);
+        dataShift(thim_temperature);
+        dataShift(thim_illuminance);
 
-		json["thim_temperature"] = String(thim_temperature[0]);
-		json["thim_humidity"] = String(thim_humidity[0]);
-		json["thim_illuminance"] = String(thim_illuminance[0]);
+        json["thim_temperature"] = String(thim_temperature[0]);
+        json["thim_humidity"] = String(thim_humidity[0]);
+        json["thim_illuminance"] = String(thim_illuminance[0]);
 
-		thimHasNewData = false;
-	}
+        thimHasNewData = false;
+    }
 #endif
 
 #if IAQ_MODULE
-	if (bme680HasNewData)
-	{
-		dataShift(iaqm_temperature);
-		dataShift(iaqm_humidity);
-		dataShift(iaqm_pressure);
-		dataShift(iaqm_iaq);
-		dataShift(iaqm_co2Equivalent);
-		dataShift(iaqm_breathVocEquivalent);
+    if (bme680HasNewData)
+    {
+        dataShift(iaqm_temperature);
+        dataShift(iaqm_humidity);
+        dataShift(iaqm_pressure);
+        dataShift(iaqm_iaq);
+        dataShift(iaqm_co2Equivalent);
+        dataShift(iaqm_breathVocEquivalent);
 
-		json["iaqm_temperature"] = String(iaqm_temperature[0]);
-		json["iaqm_humidity"] = String(iaqm_humidity[0]);
-		json["iaqm_pressure"] = String(iaqm_pressure[0]);
+        json["iaqm_temperature"] = String(iaqm_temperature[0]);
+        json["iaqm_humidity"] = String(iaqm_humidity[0]);
+        json["iaqm_pressure"] = String(iaqm_pressure[0]);
 
-		if (iaqIniting)
-		{
-			if (millis() - startLoopMs > 360000)
-			{
-				iaqIniting = false;
-			}
-		}
-		else
-		{
-			json["iaqm_iaq"] = String(iaqm_iaq[0]);
-			json["iaqm_co2Equivalent"] = String(iaqm_co2Equivalent[0]);
-			json["iaqm_breathVocEquivalent"] = String(iaqm_breathVocEquivalent[0] * 1000);
-		}
+        if (iaqIniting)
+        {
+            if (millis() - startLoopMs > 360000)
+            {
+                iaqIniting = false;
+            }
+        }
+        else
+        {
+            json["iaqm_iaq"] = String(iaqm_iaq[0]);
+            json["iaqm_co2Equivalent"] = String(iaqm_co2Equivalent[0]);
+            json["iaqm_breathVocEquivalent"] = String(iaqm_breathVocEquivalent[0] * 1000);
+        }
 
-		bme680HasNewData = false;
-	}
+        bme680HasNewData = false;
+    }
 
 #endif
 
-	if (!json.isNull())
-	{
-		serializeJson(json, pubPayload);
-		mqttClient.publish(hamdhHG.getStateTopic(), pubPayload);
-	}
+    if (!json.isNull())
+    {
+        serializeJson(json, pubPayload);
+        mqttClient.publish(hamdhHG.getStateTopic(), pubPayload);
+    }
 }
 
 void loop()
 {
-	mqttClient.loop();
+    mqttClient.loop();
 #if (THI_MODULE || IAQ_MODULE) // if there is sensor need to public
 
 #if THI_MODULE
-	if (millis() - lastReadTHIMs > 2000 && bh1750_1.measurementReady(true) && bh1750_2.measurementReady(true)) // read thi mod data to the arrays
-	{
-		shtc3.update();
-		if (shtc3.lastStatus == SHTC3_Status_Nominal)
-		{
-			thim_temperature[1] = shtc3.toDegC();
-			thim_humidity[1] = shtc3.toPercent();
-		}
+    if (millis() - lastReadTHIMs > 2000 && bh1750_1.measurementReady(true) && bh1750_2.measurementReady(true)) // read thi mod data to the arrays
+    {
+        shtc3.update();
+        if (shtc3.lastStatus == SHTC3_Status_Nominal)
+        {
+            thim_temperature[1] = shtc3.toDegC();
+            thim_humidity[1] = shtc3.toPercent();
+        }
 
-		int tempInt = round(thim_temperature[1]);
-		float tempFactor = 1.0f - (tempInt - 20.0f) * 0.0005f;
+        int tempInt = round(thim_temperature[1]);
+        float tempFactor = 1.0f - (tempInt - 20.0f) * 0.0005f;
 
-		float lux1 = bh1750_1.readLightLevel();
-		float lux2 = bh1750_2.readLightLevel();
+        float lux1 = bh1750_1.readLightLevel();
+        float lux2 = bh1750_2.readLightLevel();
 
-		bh1750_1.configure(BH1750::ONE_TIME_HIGH_RES_MODE);
-		bh1750_2.configure(BH1750::ONE_TIME_HIGH_RES_MODE);
-		thim_illuminance[1] = fmaxf(lux1, lux2) * tempFactor;
+        bh1750_1.configure(BH1750::ONE_TIME_HIGH_RES_MODE);
+        bh1750_2.configure(BH1750::ONE_TIME_HIGH_RES_MODE);
+        thim_illuminance[1] = fmaxf(lux1, lux2) * tempFactor;
 
-		if (abs(thim_temperature[0] - thim_temperature[1]) > 0.3 || abs(thim_humidity[0] - thim_humidity[1]) > 3)
-		{
-			thimEvent = true;
-		}
+        if (abs(thim_temperature[0] - thim_temperature[1]) > 0.3 || abs(thim_humidity[0] - thim_humidity[1]) > 3)
+        {
+            thimEvent = true;
+        }
 
-		thimHasNewData = true;
-		lastReadTHIMs = millis();
-	}
+        thimHasNewData = true;
+        lastReadTHIMs = millis();
+    }
 #endif
 
 #if IAQ_MODULE
 
-	if (bme680.run()) // read bme680 data to the arrays
-	{
-		bme680HasNewData = true;
-		iaqm_temperature[1] = bme680.temperature;
-		iaqm_humidity[1] = bme680.humidity;
-		iaqm_pressure[1] = bme680.pressure;
-		iaqm_iaq[1] = bme680.staticIaq;
-		iaqm_co2Equivalent[1] = bme680.co2Equivalent;
-		iaqm_breathVocEquivalent[1] = bme680.breathVocEquivalent;
+    if (bme680.run()) // read bme680 data to the arrays
+    {
+        bme680HasNewData = true;
+        iaqm_temperature[1] = bme680.temperature;
+        iaqm_humidity[1] = bme680.humidity;
+        iaqm_pressure[1] = bme680.pressure;
+        iaqm_iaq[1] = bme680.staticIaq;
+        iaqm_co2Equivalent[1] = bme680.co2Equivalent;
+        iaqm_breathVocEquivalent[1] = bme680.breathVocEquivalent;
 
-		if (abs(iaqm_temperature[0] - iaqm_temperature[1]) > 0.3 || abs(iaqm_humidity[0] - iaqm_humidity[1]) > 3 || abs(iaqm_iaq[0] - iaqm_iaq[1]) > 15)
-		{
-			iaqmEvent = true; // event flag ture if measurements change too fast
-		}
-	}
+        if (abs(iaqm_temperature[0] - iaqm_temperature[1]) > 0.3 || abs(iaqm_humidity[0] - iaqm_humidity[1]) > 3 || abs(iaqm_iaq[0] - iaqm_iaq[1]) > 15)
+        {
+            iaqmEvent = true; // event flag ture if measurements change too fast
+        }
+    }
 
 #endif
 
-	// time driven and event drivent public
-	if ((millis() - lastPubMs > timeDrivenPubInterval * 1000)
+    if (mqttClient.isConnected())
+    {
+        // time driven and event drivent public
+        if ((millis() - lastPubMs > timeDrivenPubInterval * 1000)
 #if IAQ_MODULE
-		|| iaqmEvent
+            || iaqmEvent
 #endif
 #if THI_MODULE
-		|| thimEvent
+            || thimEvent
 #endif
-	)
-	{
-		pubSensorsData();
-		lastPubMs = millis();
+        )
+        {
+            pubSensorsData();
+            lastPubMs = millis();
 
 #if IAQ_MODULE
-		iaqmEvent = false; // reset event flags
+            iaqmEvent = false; // reset event flags
 #endif
 #if THI_MODULE
-		thimEvent = false;
+            thimEvent = false;
 #endif
-	}
+        }
+    }
 #endif
 
 #if ZGB_MODULE
-	size_t bytes_read;
-	uint8_t net_buf[BUFFER_SIZE];
-	uint8_t serial_buf[BUFFER_SIZE];
+    size_t bytes_read;
+    uint8_t net_buf[BUFFER_SIZE];
+    uint8_t serial_buf[BUFFER_SIZE];
 
-	if (WiFi.status() != WL_CONNECTED)
-	{
-		// we've lost the connection, so we need to reconnect
-		if (wClient)
-		{
-			wClient.stop();
-		}
-	}
-	// Check if a client has connected
-	if (!wClient.connected())
-	{
-		// eat any bytes in the serial buffer as there is nothing to see them
-		while (zgbSerial.available())
-		{
-			zgbSerial.read();
-		}
+    if (WiFi.status() != WL_CONNECTED)
+    {
+        // we've lost the connection, so we need to reconnect
+        if (wClient)
+        {
+            wClient.stop();
+        }
+    }
+    // Check if a client has connected
+    if (!wClient.connected())
+    {
+        // eat any bytes in the serial buffer as there is nothing to see them
+        while (zgbSerial.available())
+        {
+            zgbSerial.read();
+        }
 
-		wClient = ser2NetServer.available();
-	}
+        wClient = ser2NetServer.available();
+    }
 
 #define min(a, b) ((a) < (b) ? (a) : (b))
 
-	if (wClient.connected())
-	{
-		// check the network for any bytes to send to the serial
-		int count = wClient.available();
-		if (count > 0)
-		{
-			bytes_read = wClient.read(net_buf, min(count, BUFFER_SIZE));
-			zgbSerial.write(net_buf, bytes_read);
-			zgbSerial.flush();
-		}
+    if (wClient.connected())
+    {
+        // check the network for any bytes to send to the serial
+        int count = wClient.available();
+        if (count > 0)
+        {
+            bytes_read = wClient.read(net_buf, min(count, BUFFER_SIZE));
+            zgbSerial.write(net_buf, bytes_read);
+            zgbSerial.flush();
+        }
 
-		// now check the serial for any bytes to send to the network
-		bytes_read = 0;
-		while (zgbSerial.available() && bytes_read < BUFFER_SIZE)
-		{
-			serial_buf[bytes_read] = zgbSerial.read();
-			bytes_read++;
-		}
+        // now check the serial for any bytes to send to the network
+        bytes_read = 0;
+        while (zgbSerial.available() && bytes_read < BUFFER_SIZE)
+        {
+            serial_buf[bytes_read] = zgbSerial.read();
+            bytes_read++;
+        }
 
-		if (bytes_read > 0)
-		{
-			wClient.write((const uint8_t *)serial_buf, bytes_read);
-			wClient.flush();
-		}
-	}
-	else
-	{
-		wClient.stop();
-	}
+        if (bytes_read > 0)
+        {
+            wClient.write((const uint8_t *)serial_buf, bytes_read);
+            wClient.flush();
+        }
+    }
+    else
+    {
+        wClient.stop();
+    }
 #endif
 
 #if SERIAL_DEBUG
-	if (Serial.available())
-	{
-		String cmd = Serial.readString();
-		if (cmd.indexOf("lsmod") != -1)
-		{
-			Serial.println(moduleList());
-		}
-		else if (cmd.indexOf("restore") != -1)
-		{
-			SPIFFS.format();
-			WiFi.disconnect(true, true);
-			ESP.restart();
-			delay(1000);
-		}
-		else if (cmd.indexOf("reboot") != -1)
-		{
-			ESP.restart();
-			delay(1000);
-		}
-	}
+    if (Serial.available())
+    {
+        String cmd = Serial.readString();
+        if (cmd.indexOf("lsmod") != -1)
+        {
+            Serial.println(moduleList());
+        }
+        else if (cmd.indexOf("restore") != -1)
+        {
+            SPIFFS.format();
+            WiFi.disconnect(true, true);
+            ESP.restart();
+            delay(1000);
+        }
+        else if (cmd.indexOf("reboot") != -1)
+        {
+            ESP.restart();
+            delay(1000);
+        }
+    }
 
 #endif
 }
