@@ -750,7 +750,7 @@ bool importPortalConfig()
     // An unchanged empty UI field must not erase an un-loaded legacy secret.
     if (strcmp(value, HomeGearSerialConfig::field(pendingConfig, key)) == 0) continue;
     size_t length = strlen(value);
-    if (!length && (key == HomeGearSerialConfig::Key::MqttServer || key == HomeGearSerialConfig::Key::HomeassistantServer)) continue;
+    if (!length && key == HomeGearSerialConfig::Key::MqttServer) continue;
     if (!HomeGearSerialConfig::setValue(candidate, key, value, length))
     {
       Serial.printf("CONFIG ERROR INVALID_PORTAL_FIELD %s\n", HomeGearSerialConfig::keyName(key));
