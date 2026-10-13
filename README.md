@@ -47,7 +47,6 @@ Home Assistant MQTT Discovery 会生成 `hitachi_ac3_25c_dry` climate 实体，�
 
 ```text
 config show
-config set homeassistant_server 192.168.0.109
 config set mqtt_server 192.168.0.109
 config apply
 ```
@@ -56,7 +55,7 @@ config apply
 
 支持 `mqtt_server`、`mqtt_port`、`mqtt_user`、`mqtt_pwd`、`homeassistant_server`、`homeassistant_port`、`homeassistant_token`。服务器填写 IP 或主机名，不含 `http://`、路径或端口；端口范围为 1–65535。服务器最长 63 字节，用户名/密码最长 31 字节，令牌最长 255 字节。参数名后第一个空格分隔值，后面的空格属于值，密码的首尾空格会保留；使用 `config set mqtt_pwd ""` 可清空密码，令牌同理。
 
-上述 IP 是配置示例，源码没有固定服务器地址。只有 HA 和 MQTT 同机时才同时修改两项。
+上述 IP 是 MQTT 配置示例，源码没有固定服务器地址。`homeassistant_server` 是独立的可选参数，MQTT Discovery 无需填写它；如需配置，单独使用 `config set homeassistant_server <地址>`，使用 `config set homeassistant_server ""` 可清空这项参数，MQTT 配置会保留。
 
 ### 编译与验证
 

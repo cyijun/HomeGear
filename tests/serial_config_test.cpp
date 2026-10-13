@@ -54,6 +54,13 @@ int main() {
   assert(std::strcmp(values.mqtt_user, "test-user") == 0);
   assert(std::strcmp(values.mqtt_pwd, " old password ") == 0);
   assert(std::strcmp(values.homeassistant_token, "test-token") == 0);
+  assert(HomeGearSerialConfig::setValue(values, Key::HomeassistantServer, "192.168.0.109", 13));
+  command = parse("config set homeassistant_server \"\"");
+  assert(HomeGearSerialConfig::setValue(values, command.key, command.value, command.valueLength));
+  assert(values.homeassistant_server[0] == '\0');
+  assert(std::strcmp(values.mqtt_server, "192.168.0.109") == 0);
+  assert(std::strcmp(values.mqtt_port, "1883") == 0);
+  assert(std::strcmp(values.homeassistant_token, "test-token") == 0);
 
   command = parse("config set mqtt_pwd  spaced password ");
   assert(HomeGearSerialConfig::setValue(values, command.key, command.value, command.valueLength));

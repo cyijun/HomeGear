@@ -95,7 +95,7 @@ class HomeGearSerialConfig {
       return port >= 1 && port <= 65535;
     }
     if (key == Key::MqttServer || key == Key::HomeassistantServer) {
-      if (!length) return false;
+      if (!length) return key == Key::HomeassistantServer;
       for (std::size_t i = 0; i < length; ++i) {
         const char c = value[i];
         if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
