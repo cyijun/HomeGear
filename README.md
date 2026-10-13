@@ -1,6 +1,26 @@
 # HomeGear
 An ESP32 based scalable smart home hardware stack
 
+## 1.1：模块拆分与运行功耗优化
+
+`HomeGear.ino` 只保留启动顺序和循环调度；编译开关集中在 `Software/HomeGear/HomeGearConfig.h`。配置、配网、MQTT/HA、串口、传感器、红外、旧遥控协议和 ZigBee 转发分别由独立模块负责。
+
+- CPU 常态运行在 **160 MHz**，主循环每轮等待 **2 ms**。日立等红外发射时临时恢复 **240 MHz**，沿用已验证的库载波时序，发射后恢复；启动及 MQTT 重连不自动发射红外。
+- Wi-Fi 稳定连接 30 秒，且没有配网客户端、HTTP 请求或最近 45 秒内的配置提交时，自动关闭遗留配网 AP。Wi-Fi 保持 `MIN_MODEM` 省电和 MQTT 在线；当前锁定核心未开启自动 Light-sleep。
+- ZigBee TCP `1234` 转发使用独立任务，在双核 ESP32 上与主循环分属两核。UART2 接收/发送缓冲为 4096/1024 字节，双向各有 4096 字节队列，保留部分写入并处理背压。移除了会清空 TCP 接收数据的 `WiFiClient.flush()`；网络长期不读取时仍受有限缓冲限制。
+- SHTC3 保持普通精度、2 秒采样、测量后休眠，与两颗 BH1750 独立调度；光照模组故障不会阻止温湿度采样。BME680 加载与硬件供电相符的 **3.3V / 3 秒 / LP** BSEC 配置，保留空气质量的 6 分钟预热，并报告算法准确度。
+- 普通传感器变化合并为最短 **15 秒**上报，心跳为 **300 秒**；首次有效数据、MQTT 重连和 `pubdata` 请求可立即上报。每次发布完整的已知读数，消息与 HA Discovery 使用正确的 retain 参数；发布失败不会丢弃待发送变化。
+
+115200 串口新增只读诊断命令：
+
+```text
+power status
+sensors status
+zigbee status
+```
+
+分别显示实际 CPU 频率和循环工作/等待时间、传感器读数与 BSEC 状态、ZigBee 连接与转发计数。循环工作百分比描述主循环的时间分配，不代表整机功耗；本轮不设置未经对照测量的固定温度偏移。`thim_*` 是 SHTC3 数据，`iaqm_*` 是 BME680/BSEC 数据。稳压器、气体传感器加热和外壳热耦合仍需在实际摆放环境中用参考温湿度计检查。
+
 ## 日立中央空调：25℃除湿开关
 
 现已在用户的日立中央空调墙面控制器上实测 `HITACHI_AC3` 开机和关机帧。具体面板型号尚未确认；首版只开放已验证的 **25℃、除湿、低风开/关**。
@@ -43,7 +63,7 @@ Home Assistant MQTT Discovery 会生成 `hitachi_ac3_25c_dry` climate 实体，�
 
 ### 串口配置服务器
 
-启动时先尝试连接已保存的 Wi-Fi，初次连接等待上限为 10 秒；随后即使 Wi-Fi 未连接，也可使用串口配置和非阻塞配网门户。后台会使用已保存凭据恢复连接，不会关闭配网 AP；正在关联、等待 DHCP 或刚提交配网时会暂缓重试。115200 波特率，每条命令以换行结束：
+启动时先尝试连接已保存的 Wi-Fi，初次连接等待上限为 10 秒；随后即使 Wi-Fi 未连接，也可使用串口配置和非阻塞配网门户。后台会使用已保存凭据恢复连接；正在关联、等待 DHCP 或刚提交配网时会暂缓重试。连接稳定后按上述条件回收配网 AP；更换到无法连接的网络后，重启设备会重新开放配网门户。115200 波特率，每条命令以换行结束：
 
 ```text
 config show
@@ -61,16 +81,15 @@ config apply
 
 完整固件已使用 ESP32 Core **2.0.17** 编译通过。固定库版本与作者库的 Git 提交见 [build-dependencies.json](build-dependencies.json)；原项目使用旧版 Arduino `String` MQTT API，不能直接替换为新版 ESP32MQTTClient。
 
-安装指定核心和依赖后，可编译 `Software/HomeGear`，FQBN 为 `esp32:esp32:esp32`。模块开关仍由 `.ino` 顶部配置；当前默认启用温湿度/光照、空气质量、红外和 ZigBee，与实机模组一致。
+安装指定核心和依赖后，可编译 `Software/HomeGear`，FQBN 为 `esp32:esp32:esp32`。模块开关由 `HomeGearConfig.h` 配置；当前默认启用温湿度/光照、空气质量、红外和 ZigBee，与实机模组一致。
 
-原生 C++11 测试核对实测 ON/OFF 帧、反码、初始未知状态、重复绝对开关，以及异常控制消息：
+原生 C++11 测试核对实测 ON/OFF 帧、串口配置、传感器快照/限流、部分读写和背压、配网门户回收条件，以及临时 CPU 时钟恢复。SensorService 集成测试执行真实服务与锁定 ArduinoJson 序列化器，使用模拟硬件和 MQTT 驱动：
 
 ```sh
-c++ -std=c++11 -Wall -Wextra -Werror -pedantic tests/hitachi_ac3_control_test.cpp -o /tmp/homegear-hitachi-ac3-test
-/tmp/homegear-hitachi-ac3-test
-c++ -std=c++11 -Wall -Wextra -Werror -pedantic tests/serial_config_test.cpp -o /tmp/homegear-serial-config-test
-/tmp/homegear-serial-config-test
+tests/run-host-tests.sh
 ```
+
+测试脚本默认从相邻 `HomeGear-build-env/libraries` 读取固定版本的 ArduinoJson 与 BSEC；在其他环境可通过 `HOMEGEAR_TEST_LIBRARIES` 指定同版本库所在目录。
 
 串口配置测试覆盖端口和长度边界、异常命令、密码空格、清空凭据，以及修改地址时保留其他参数。刷入已有设备前备份 flash，确认分区一致后只更新应用分区，以保留 Wi-Fi 和 SPIFFS 配置；启动或配置应用不会自动发送空调开关信号。
 

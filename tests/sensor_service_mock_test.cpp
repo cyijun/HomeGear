@@ -1,0 +1,202 @@
+// Compile with tests/sensor_service_stubs, locked ArduinoJson/src and BSEC/src
+// include paths. The real SensorService.cpp and JSON serializer run on the host.
+#include "../Software/HomeGear/TrackedBsec.cpp"
+#include "../Software/HomeGear/SensorService.cpp"
+#include <cassert>
+#include <iostream>
+
+namespace sensor_mock {
+uint32_t now = 0;
+bool shtHealthy = true, crcHealthy = true, lightsHealthy = false, bsecHealthy = true;
+float temperature = 23.0f;
+unsigned shtReads = 0, lightReads = 0, wireBegins = 0, bsecConfigurations = 0;
+uint32_t bsecOutputMask = UINT32_MAX;
+bool bsecZeroSignals = false;
+int bsecAlgorithmStatus = BSEC_OK;
+}
+
+extern "C" bsec_library_return_t bsec_do_steps(const bsec_input_t *const, const uint8_t,
+    bsec_output_t *outputs, uint8_t *count) {
+  const uint8_t capacity = *count;
+  *count = 0;
+  const bsec_output_t available[] = {
+    {sensor_mock::bsecZeroSignals ? 0.0f : 26.0f, BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_TEMPERATURE, 0},
+    {sensor_mock::bsecZeroSignals ? 0.0f : 48.0f, BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_HUMIDITY, 0},
+    {101325.0f, BSEC_OUTPUT_RAW_PRESSURE, 0},
+    {sensor_mock::bsecZeroSignals ? 0.0f : 100.0f, BSEC_OUTPUT_STATIC_IAQ, 2},
+    {600.0f, BSEC_OUTPUT_CO2_EQUIVALENT, 2},
+    {sensor_mock::bsecZeroSignals ? 0.0f : 0.5f, BSEC_OUTPUT_BREATH_VOC_EQUIVALENT, 2},
+    {1.0f, BSEC_OUTPUT_STABILIZATION_STATUS, 0},
+    {1.0f, BSEC_OUTPUT_RUN_IN_STATUS, 0}
+  };
+  for (const auto &output : available) {
+    if ((sensor_mock::bsecOutputMask & (uint32_t(1) << output.sensor_id)) && *count < capacity)
+      outputs[(*count)++] = output;
+  }
+  return sensor_mock::bsecAlgorithmStatus;
+}
+MockSerial Serial;
+TwoWire Wire;
+namespace homegear { namespace mqtt {
+ESP32MQTTClient &client() { static ESP32MQTTClient client; return client; }
+HAMqttDiscoveryHandler &discovery() { static HAMqttDiscoveryHandler device; return device; }
+}}
+
+static void tickAt(uint32_t now) { sensor_mock::now = now; homegear::sensors::tick(now); }
+
+int main() {
+  using namespace homegear::sensors;
+  ESP32MQTTClient &client = homegear::mqtt::client();
+  begin();
+  assert(sensor_mock::wireBegins == 1);
+  assert(sensor_mock::bsecConfigurations == 1);
+  assert(bme680.requestedRate == BSEC_SAMPLE_RATE_LP);
+  const uint8_t expectedConfig[] = {
+#include "config/generic_33v_3s_4d/bsec_iaq.txt"
+  };
+  assert(std::memcmp(bme680.config, expectedConfig, sizeof(expectedConfig)) == 0);
+  tickAt(0);
+  assert(client.messages.empty());  // Offline startup cannot discard the forced snapshot.
+  client.connected = true;
+  tickAt(2000);
+  assert(client.messages.size() == 1);
+  StaticJsonDocument<1024> json;
+  assert(!deserializeJson(json, client.messages.back().payload));
+  assert(json["thim_temperature"].as<std::string>() == "23.00");
+  assert(json.containsKey("thim_humidity"));  // Both BH1750 failures cannot block SHTC3.
+  assert(json.containsKey("iaqm_pressure"));
+  assert(!json.containsKey("thim_illuminance"));
+  assert(!json.containsKey("iaqm_iaq"));  // Six-minute gas warmup remains in force.
+  assert(client.messages.back().qos == 0 && client.messages.back().retain);
+
+  sensor_mock::temperature = 25.0f;
+  tickAt(4000);
+  assert(client.messages.size() == 1);  // Normal changes are coalesced for 15 seconds.
+  requestPublish();
+  tickAt(4001);
+  assert(client.messages.size() == 2);
+  json.clear();
+  assert(!deserializeJson(json, client.messages.back().payload));
+  assert(json["thim_temperature"].as<std::string>() == "25.00");
+  assert(json.containsKey("thim_humidity") && json.containsKey("iaqm_pressure"));
+
+  client.accept = false;
+  requestPublish();
+  tickAt(5000);
+  assert(client.messages.size() == 3 && !client.messages.back().accepted);
+  client.accept = true;
+  tickAt(5999);
+  assert(client.messages.size() == 3);
+  sensor_mock::temperature = 27.0f;
+  tickAt(6000);
+  assert(client.messages.size() == 4);
+  json.clear();
+  assert(!deserializeJson(json, client.messages.back().payload));
+  assert(json["thim_temperature"].as<std::string>() == "27.00");
+
+  // A callback during the synchronous publish must remain pending after commit.
+  client.onPublish = requestPublish;
+  requestPublish();
+  tickAt(6001);
+  assert(client.messages.size() == 5);
+  client.onPublish = nullptr;
+  tickAt(6002);
+  assert(client.messages.size() == 6);
+
+  sensor_mock::lightsHealthy = true;
+  tickAt(8000);  // Independently initialize the lights.
+  tickAt(10000); // Then read their one-shot results.
+  assert(sensor_mock::lightReads == 2);
+  requestPublish();
+  tickAt(360000);
+  json.clear();
+  assert(!deserializeJson(json, client.messages.back().payload));
+  assert(json.containsKey("thim_illuminance") && json.containsKey("iaqm_iaq"));
+  assert(json["iaqm_breathVocEquivalent"].as<std::string>() == "500.00");
+  assert(json["iaqm_accuracy"].as<int>() == 2);
+
+  // GAS_VALID=false can yield only pressure/status. Cleared-but-absent fields
+  // must preserve their last known readings and calibration, never become 0.
+  sensor_mock::bsecOutputMask = uint32_t(1) << BSEC_OUTPUT_RAW_PRESSURE;
+  requestPublish();
+  tickAt(363000);
+  assert(bme680.temperature == 0.0f && bme680.staticIaq == 0.0f && bme680.breathVocEquivalent == 0.0f);
+  assert(trackedBsec::hasOutput(BSEC_OUTPUT_RAW_PRESSURE));
+  assert(!trackedBsec::hasOutput(BSEC_OUTPUT_STATIC_IAQ));
+  json.clear();
+  assert(!deserializeJson(json, client.messages.back().payload));
+  assert(json["iaqm_temperature"].as<std::string>() == "26.00");
+  assert(json["iaqm_humidity"].as<std::string>() == "48.00");
+  assert(json["iaqm_iaq"].as<std::string>() == "100.00");
+  assert(json["iaqm_breathVocEquivalent"].as<std::string>() == "500.00");
+  assert(json["iaqm_accuracy"].as<int>() == 2);
+  assert(json["iaqm_stabilizationStatus"].as<int>() == 1);
+
+  // Presence disambiguates real, newly measured zeros from absent outputs.
+  sensor_mock::bsecOutputMask = UINT32_MAX;
+  sensor_mock::bsecZeroSignals = true;
+  requestPublish();
+  tickAt(366000);
+  json.clear();
+  assert(!deserializeJson(json, client.messages.back().payload));
+  assert(json["iaqm_temperature"].as<std::string>() == "0.00");
+  assert(json["iaqm_humidity"].as<std::string>() == "0.00");
+  assert(json["iaqm_iaq"].as<std::string>() == "0.00");
+  assert(json["iaqm_breathVocEquivalent"].as<std::string>() == "0.00");
+  assert(json["iaqm_accuracy"].as<int>() == 2);
+
+  // No gateway invocation and a failed algorithm call both clear presence.
+  tickAt(366001);
+  assert(trackedBsec::outputMask() == 0);
+  sensor_mock::bsecAlgorithmStatus = -1;
+  tickAt(369000);
+  assert(trackedBsec::outputMask() == 0);
+  sensor_mock::bsecAlgorithmStatus = BSEC_OK;
+  sensor_mock::bsecZeroSignals = false;
+
+  client.messages.clear();
+  publishDiscovery(client, homegear::mqtt::discovery());
+  assert(client.messages.size() == 9);
+  for (const auto &message : client.messages) assert(message.qos == 0 && message.retain);
+  printStatus();
+  assert(Serial.output.find("SENSORS BEGIN") != std::string::npos);
+  assert(Serial.output.find("SENSORS bsec_config=33v_3s_4d") != std::string::npos);
+  assert(Serial.output.find("SENSORS END") != std::string::npos);
+
+  // No valid first sample must produce no empty payload or initialized fake value.
+  client.messages.clear();
+  sensor_mock::now = 400000;
+  sensor_mock::crcHealthy = false;
+  sensor_mock::lightsHealthy = false;
+  sensor_mock::bsecHealthy = false;
+  begin();
+  tickAt(400000);
+  assert(client.messages.empty());
+  sensor_mock::crcHealthy = true;
+  tickAt(402000);
+  assert(client.messages.size() == 1);
+  json.clear();
+  assert(!deserializeJson(json, client.messages.back().payload));
+  assert(json.size() == 2 && json.containsKey("thim_temperature") && json.containsKey("thim_humidity"));
+
+  // On startup a partial frame must not create never-measured zero T/RH/gas.
+  client.messages.clear();
+  sensor_mock::now = 500000;
+  sensor_mock::crcHealthy = false;
+  sensor_mock::bsecHealthy = true;
+  sensor_mock::bsecOutputMask = uint32_t(1) << BSEC_OUTPUT_RAW_PRESSURE;
+  begin();
+  tickAt(500000);
+  assert(client.messages.size() == 1);
+  json.clear();
+  assert(!deserializeJson(json, client.messages.back().payload));
+  assert(json.containsKey("iaqm_pressure"));
+  assert(!json.containsKey("iaqm_temperature") && !json.containsKey("iaqm_humidity"));
+  assert(!json.containsKey("iaqm_accuracy") && !json.containsKey("iaqm_stabilizationStatus"));
+  requestPublish();
+  tickAt(860000);  // Warmup ending must not manufacture absent gas values.
+  json.clear();
+  assert(!deserializeJson(json, client.messages.back().payload));
+  assert(!json.containsKey("iaqm_iaq") && !json.containsKey("iaqm_breathVocEquivalent"));
+  std::cout << "sensor_service_mock_test: PASS\n";
+}
