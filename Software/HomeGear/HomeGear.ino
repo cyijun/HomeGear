@@ -51,7 +51,8 @@
 #define IR_SINGFUN_FAN false
 #define IR_MIDEA_AC false
 #define IR_COOLIX_AC false
-#define IR_HAIER_AC true
+#define IR_HAIER_AC false
+#define IR_HITACHI_AC3 true
 #define RF_PHILIPS_FAN_LIGHT false
 
 //***** Basic *****
@@ -153,6 +154,19 @@ float iaqm_breathVocEquivalent[2];
 #include "IR_Code.h"
 const uint16_t kIrLed = 4;
 IRsend irsend(kIrLed);
+
+#if IR_HITACHI_AC3
+#include <ir_Hitachi.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include "HitachiAc3Control.h"
+HAMqttDiscoveryHandler hamdhHitachi("homegear_ir", chipId + "_hitachi_ac3", "Hitachi", "Hitachi AC3 25 C Dry", SOFTWARE_VERSION, hamdhHG);
+HitachiAc3Control hitachiAc3;
+QueueHandle_t hitachiAc3Queue = nullptr;
+const uint8_t kHitachiAc3OnEvent = 1;
+const uint8_t kHitachiAc3OffEvent = 2;
+const uint8_t kHitachiAc3PublishEvent = 3;
+#endif
 
 #if IR_SINGFUN_FAN
 HAMqttDiscoveryHandler hamdhSF("homegear_ir", "00001", "SingFun", "SingFun Floor Fan", SOFTWARE_VERSION, hamdhHG);
@@ -262,6 +276,86 @@ HardwareSerial zgbSerial(2);
 
 // MQTT
 ESP32MQTTClient mqttClient;
+
+#if (IR_MODULE && IR_HITACHI_AC3)
+// Only loop() reads or changes command state, sends IR and publishes snapshots.
+String hitachiAc3Feedback()
+{
+  StaticJsonDocument<256> feedback;
+  feedback["achitachi_mode"] = hitachiAc3.getMode();
+  feedback["achitachi_temperature"] = hitachiAc3.getTemperature();
+  feedback["achitachi_fan_mode"] = hitachiAc3.getFanMode();
+  if (hitachiAc3.isKnown())
+    feedback["achitachi_power"] = hitachiAc3.getPower();
+  else
+    feedback["achitachi_power"] = nullptr;
+  feedback["state_source"] = hitachiAc3.getStateSource();
+  String payload;
+  serializeJson(feedback, payload);
+  return payload;
+}
+
+void publishHitachiAc3State()
+{
+  if (hitachiAc3.isKnown() && mqttClient.isConnected())
+    mqttClient.publish(hamdhHitachi.getStateTopic(), hitachiAc3Feedback(), 0, true);
+}
+
+bool enqueueHitachiAc3Event(uint8_t event)
+{
+  if (!hitachiAc3Queue)
+  {
+    Serial.println("HITACHI ERROR NOT_INITIALIZED");
+    return false;
+  }
+  if (xQueueSend(hitachiAc3Queue, &event, 0) != pdTRUE)
+  {
+    Serial.println("HITACHI ERROR COMMAND_QUEUE_FULL");
+    return false;
+  }
+  return true;
+}
+
+bool commandHitachiAc3(bool power)
+{
+  return enqueueHitachiAc3Event(power ? kHitachiAc3OnEvent : kHitachiAc3OffEvent);
+}
+
+void processHitachiAc3Event()
+{
+  uint8_t event;
+  if (!hitachiAc3Queue || xQueueReceive(hitachiAc3Queue, &event, 0) != pdTRUE) return;
+  if (event == kHitachiAc3PublishEvent)
+  {
+    publishHitachiAc3State();
+    return;
+  }
+  if (event != kHitachiAc3OnEvent && event != kHitachiAc3OffEvent) return;
+  hitachiAc3.setPower(event == kHitachiAc3OnEvent);
+  irsend.sendHitachiAc3(hitachiAc3.getRaw(), HitachiAc3Control::kStateLength, 0);
+  publishHitachiAc3State();
+#if SERIAL_DEBUG
+  Serial.print("HITACHI ");
+  Serial.println(hitachiAc3Feedback());
+#endif
+}
+
+void printHitachiAc3State()
+{
+  Serial.println(hitachiAc3Feedback());
+}
+
+void handleHitachiAc3Command(const String &payload)
+{
+  bool power;
+  if (!HitachiAc3Control::parseModeCommand(payload.c_str(), payload.length(), power))
+  {
+    Serial.println("HITACHI ERROR EXPECTED_ONLY_LITERAL_MODE_DRY_OR_OFF");
+    return;
+  }
+  commandHitachiAc3(power);
+}
+#endif
 
 // define your default values here, if there are different values in config.json, they are overwritten.
 #define SERVER_ADDR_LEN 64
@@ -476,6 +570,10 @@ void modulesStart()
 
 #if IR_MODULE
   irsend.begin();
+#if IR_HITACHI_AC3
+  hitachiAc3Queue = xQueueCreate(8, sizeof(uint8_t));
+  if (!hitachiAc3Queue) Serial.println("HITACHI ERROR QUEUE_ALLOCATION_FAILED");
+#endif
 #if IR_GREE_AC
   greeAC.begin();
 
@@ -520,8 +618,9 @@ void setup()
   {
     saveConfigToFS();
   }
-  mqttStart();
+  // Initialize hardware and the IR command queue before accepting MQTT commands.
   modulesStart();
+  mqttStart();
 
   startLoopMs = millis();
   lastPubMs = millis();
@@ -640,6 +739,20 @@ void onConnectionEstablishedCallback(esp_mqtt_client_handle_t client)
 #endif
 
 #if IR_MODULE
+#if IR_HITACHI_AC3
+  HAMqttDiscoveryClimate hamdhHitachiAC(hamdhHitachi);
+  hamdhHitachiAC.setDeviceNameMin("hitachi_ac3_25c_dry");
+  hamdhHitachiAC.setModeCommandTemplate("{\"achitachi_mode\": \"{{ value }}\"}");
+  hamdhHitachiAC.setModeStateTemplate("{{ value_json.achitachi_mode }}");
+  String hitachiModes[10] = {"off", "dry", "", "", "", "", "", "", "", ""};
+  hamdhHitachiAC.setModes(hitachiModes);
+  // Fixed 25 C and low fan are attributes, not adjustable HA capabilities.
+  hamdhHitachiAC.construct();
+  mqttClient.publish(hamdhHitachiAC.getMqttDiscoveryConfigTopic(), hamdhHitachiAC.getMqttDiscoveryMesg(), 0, true);
+  mqttClient.subscribe(hamdhHitachi.getCtrlTopic(), [](const String &payload) { handleHitachiAc3Command(payload); });
+  // Schedule a loop-owned snapshot; reconnect never resets state or sends IR.
+  enqueueHitachiAc3Event(kHitachiAc3PublishEvent);
+#endif
 #if IR_SINGFUN_FAN
   HAMqttDiscoveryFan hamdhSFF(hamdhSF);
   hamdhSFF.setDeviceNameMin("singfun_fan");
@@ -1194,6 +1307,9 @@ void pubSensorsData()
 
 void loop()
 {
+#if (IR_MODULE && IR_HITACHI_AC3)
+  processHitachiAc3Event();
+#endif
   //mqttClient.loop();
 #if (THI_MODULE || IAQ_MODULE) // if there is sensor need to public
 
@@ -1333,19 +1449,35 @@ void loop()
 #if SERIAL_DEBUG
   if (Serial.available())
   {
-    String cmd = Serial.readString();
-    if (cmd.indexOf("lsmod") != -1)
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+#if (IR_MODULE && IR_HITACHI_AC3)
+    if (cmd == "hitachi_on")
+    {
+      commandHitachiAc3(true);
+    }
+    else if (cmd == "hitachi_off")
+    {
+      commandHitachiAc3(false);
+    }
+    else if (cmd == "hitachi_status")
+    {
+      printHitachiAc3State();
+    }
+    else
+#endif
+    if (cmd == "lsmod")
     {
       Serial.println(moduleList());
     }
-    else if (cmd.indexOf("restore") != -1)
+    else if (cmd == "restore")
     {
       SPIFFS.format();
       WiFi.disconnect(true, true);
       ESP.restart();
       delay(1000);
     }
-    else if (cmd.indexOf("reboot") != -1)
+    else if (cmd == "reboot")
     {
       ESP.restart();
       delay(1000);
@@ -1357,6 +1489,36 @@ void loop()
 
 esp_err_t handleMQTT(esp_mqtt_event_handle_t event)
 {
+#if (IR_MODULE && IR_HITACHI_AC3)
+    // Reject the whole Hitachi message before the MQTT library can dispatch a
+    // partial payload. The SDK reports the topic only on the first fragment.
+    static bool discardHitachiMessage = false;
+    if (event && event->event_id == MQTT_EVENT_DATA)
+    {
+      if (event->current_data_offset == 0)
+      {
+        discardHitachiMessage = false;
+        String topic = hamdhHitachi.getCtrlTopic();
+        bool isHitachiTopic = event->topic &&
+            event->topic_len == static_cast<int>(topic.length()) &&
+            memcmp(event->topic, topic.c_str(), topic.length()) == 0;
+        if (isHitachiTopic &&
+            (event->retain || event->total_data_len > static_cast<int>(HitachiAc3Control::kMaxCommandLength) ||
+             event->data_len != event->total_data_len ||
+             (event->data && event->data_len > 0 && memchr(event->data, '\0', event->data_len))))
+        {
+          discardHitachiMessage = true;
+          Serial.println("HITACHI ERROR RETAINED_FRAGMENTED_OR_INVALID_COMMAND_IGNORED");
+        }
+      }
+      if (discardHitachiMessage)
+      {
+        if (static_cast<int64_t>(event->current_data_offset) + event->data_len >= event->total_data_len)
+          discardHitachiMessage = false;
+        return ESP_OK;
+      }
+    }
+#endif
     mqttClient.onEventCallback(event);
     return ESP_OK;
 }

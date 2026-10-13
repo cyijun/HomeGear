@@ -1,0 +1,25 @@
+{
+  "fqbn": "esp32:esp32:esp32",
+  "esp32_core": "2.0.17",
+  "esp32_package_index": "https://espressif.github.io/arduino-esp32/package_esp32_index.json",
+  "libraries": {
+    "ArduinoJson": "6.21.5",
+    "WiFiManager": "2.0.17",
+    "SparkFun SHTC3 Humidity and Temperature Sensor Library": "1.1.4",
+    "BH1750": "1.3.0",
+    "BSEC Software Library": "1.8.1492",
+    "IRremoteESP8266": "2.9.0"
+  },
+  "git_libraries": {
+    "ESP32MQTTClient": {
+      "url": "https://github.com/cyijun/ESP32MQTTClient.git",
+      "commit": "6cf0baecf6f4ac3e2f9c89062714a82cbd37bef2",
+      "version": "0.1.0"
+    },
+    "HAMqttDiscoveryHandler": {
+      "url": "https://github.com/cyijun/HAMqttDiscoveryHandler.git",
+      "commit": "77f69ab43f8ab6afc0386a0b238818d540963aaf",
+      "version": "0.2.0"
+    }
+  }
+}
