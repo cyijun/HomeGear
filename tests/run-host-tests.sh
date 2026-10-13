@@ -28,3 +28,8 @@ fi
   -I "$test_source_dir/sensor_service_stubs" -I "$json_dir" -I "$bsec_dir" \
   "$test_source_dir/sensor_service_mock_test.cpp" -o "$test_output_dir/sensor_service_mock_test"
 "$test_output_dir/sensor_service_mock_test"
+
+"$compiler" -std=c++11 -Wall -Wextra -Werror -pedantic \
+  -I "$test_source_dir/ir_service_stubs" -I "$json_dir" \
+  "$test_source_dir/ir_service_mock_test.cpp" -o "$test_output_dir/ir_service_mock_test"
+"$test_output_dir/ir_service_mock_test"

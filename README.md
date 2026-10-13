@@ -37,15 +37,15 @@ zigbee status
 
 分别显示实际 CPU 频率和循环工作/等待时间、传感器读数与 BSEC 状态、ZigBee 连接与转发计数。循环工作百分比描述主循环的时间分配，不代表整机功耗；本轮不设置未经对照测量的固定温度偏移。`thim_*` 是 SHTC3 数据，`iaqm_*` 是 BME680/BSEC 数据。稳压器、气体传感器加热和外壳热耦合仍需在实际摆放环境中用参考温湿度计检查。
 
-## 日立中央空调：25℃除湿开关
+## 日立中央空调：除湿开关与目标温度
 
-现已在用户的日立中央空调墙面控制器上实测 `HITACHI_AC3` 开机和关机帧。具体面板型号尚未确认；首版只开放已验证的 **25℃、除湿、低风开/关**。
+现已在用户的日立中央空调墙面控制器上实测 `HITACHI_AC3` 的 **25℃、除湿、低风开/关**。目标温度扩展为 **17–30℃、1℃步进**，编码来自 PC-LH3B 原始捕获表；当前墙面控制器的调温响应仍待现场实测，其他模式和风速未开放。启动默认目标为 25℃。
 
 默认启用 `IR_HITACHI_AC3`，关闭原海尔空调分支。发射引脚为 GPIO 4，非反相，载波 38 kHz。设备启动不发红外；软件在第一条明确命令前保持未知状态，MQTT 重连只重发最近命令的状态。
 
 ### Home Assistant / MQTT
 
-Home Assistant MQTT Discovery 会生成 `hitachi_ac3_25c_dry` climate 实体，只提供 `off` 和 `dry` 两个模式。温度和风速固定为 25℃低风，不提供未经实测的调温或其他模式控件。
+Home Assistant MQTT Discovery 会生成 climate 实体，提供 `off`、`dry` 两个模式和目标温度控件，风速固定低风。保留原 `hitachi_ac3_25c_dry` Discovery topic 和 unique ID，让已有实体及 HomeKit 桥接继续使用；显示名称更新为 `Hitachi AC3 Dry`。
 
 控制主题为 `homegear_ir/<chipId>_hitachi_ac3/ctrl`，使用以下两种消息，发送时不要启用 retain：
 
@@ -53,28 +53,41 @@ Home Assistant MQTT Discovery 会生成 `hitachi_ac3_25c_dry` climate 实体，�
 {"achitachi_mode":"dry"}
 ```
 
-上面表示以 25℃除湿低风开机；关机使用：
+上面表示以当前目标温度除湿低风开机；关机使用：
 
 ```json
 {"achitachi_mode":"off"}
 ```
 
-每条命令只发一次完整状态帧。消息只接受一个未转义的 `achitachi_mode` 键和字面量 `dry/off`，允许标准 JSON 空白；额外字段、重复键、尾随内容、转义、NUL、超过 128 字节或分片消息都会被拒绝。retained 控制消息不会被重放。
+调温使用独立消息，例如：
+
+```json
+{"achitachi_temperature":24}
+```
+
+温度可为 JSON 数字或数字字符串。范围内的小数按四舍五入变成整数℃，并反馈实际采用的整数目标，以兼容 HomeKit 的 0.1℃滑动精度；原值低于 17℃或高于 30℃会被拒绝。未知电源状态时只暂存目标，不发送红外；电源状态已知时发送完整状态帧，保留最近命令中的电源、除湿和低风设置。开关命令也保留当前目标温度。
+
+消息只接受一个未转义的 `achitachi_mode` 键及字面量 `dry/off`，或一个 `achitachi_temperature` 键及十进制温度；允许标准 JSON 空白。额外字段、重复键、尾随内容、转义、指数、NUL、超过 128 字节或分片消息都会被拒绝。retained 控制消息不会被重放。
 
 反馈主题为 `homegear_ir/<chipId>_hitachi_ac3/attr`。反馈是完整的 retained JSON，例如：
 
 ```json
-{"achitachi_mode":"dry","achitachi_temperature":25,"achitachi_fan_mode":"low","achitachi_power":true,"state_source":"commanded"}
+{"achitachi_mode":"dry","achitachi_temperature":25,"achitachi_fan_mode":"low","achitachi_power":true,"state_source":"commanded","achitachi_current_temperature":null,"current_temperature_source":"unavailable"}
 ```
 
-这是最近发送的命令记录，红外控制没有空调状态回读。MQTT 与串口命令进入同一队列，由主循环按顺序发送，避免帧交叠及状态发布乱序。
+这是软件的目标及最近命令记录，红外控制没有空调状态回读。启动会发布 `unknown` 模式、`null` 电源和 25℃默认目标，重连重发当前软件快照，均不发红外。调温时完整状态帧中的电源来自最近的软件命令；如果之后用墙面面板改变了电源，软件无法知道，下一次调温可能恢复软件记录的开关状态。MQTT 与串口命令进入同一队列，由主循环按顺序执行，避免帧交叠及状态发布乱序。
+
+`achitachi_temperature` 是目标设定，`achitachi_current_temperature` 是当前室温，后者明确为 `null`，不借用目标或 HomeGear 的传感器读数。HA 通过 `current_temperature_template: "{{ 'None' }}"` 清空当前室温；`initial: 25` 和目标温度 state topic 避免目标退回 HA 的 21℃默认值。HA MQTT climate 的空值必须渲染为字符串 `None`，空字符串或裸 `null` 不会清空。[HA 官方说明](https://www.home-assistant.io/integrations/climate.mqtt/)
+
+HA 内置 HomeKit Bridge 的 `CurrentTemperature` 初值为 21℃，只在收到有效数字时更新；室温未知时 HomeKit 可能继续显示 21℃或最后一个有效值。普通 MQTT Discovery 不能把这个 HomeKit 特征改成空值，本项目保留 HA 中的真实未知状态。[HomeKit Bridge 稳定版实现](https://github.com/home-assistant/core/blob/2026.10.1/homeassistant/components/homekit/climate_base.py#L153)
 
 ### 串口
 
 115200 波特率，命令以换行结束：
 
-- `hitachi_on`：25℃除湿低风开机。
+- `hitachi_on`：以当前目标温度除湿低风开机。
 - `hitachi_off`：保持这组模式和温度关机。
+- `hitachi_temp 24`：设置整数目标温度（17–30℃）；未知电源状态时只暂存。
 - `hitachi_status`：只查询软件的最近命令状态；启动时报告 `unknown`。
 
 ### 串口配置服务器
@@ -99,7 +112,7 @@ config apply
 
 安装指定核心和依赖后，可编译 `Software/HomeGear`，FQBN 为 `esp32:esp32:esp32`。模块开关由 `HomeGearConfig.h` 配置；当前默认启用温湿度/光照、空气质量、红外和 ZigBee，与实机模组一致。
 
-原生 C++11 测试核对实测 ON/OFF 帧、串口配置、传感器快照/限流、部分读写和背压、配网门户回收条件，以及临时 CPU 时钟恢复。SensorService 集成测试执行真实服务与锁定 ArduinoJson 序列化器，使用模拟硬件和 MQTT 驱动：
+原生 C++11 测试核对实测 ON/OFF 帧、捕获温度字段、严格温度解析与取整、串口配置、传感器快照/限流、部分读写和背压、配网门户回收条件，以及临时 CPU 时钟恢复。SensorService 和 IrService 集成测试执行真实服务与锁定 ArduinoJson 序列化器，使用模拟硬件和 MQTT 驱动；后者还核对未知状态不发红外、开关保留目标、发送期间入队、拒绝 retained/分片消息以及 Discovery 空室温定义：
 
 ```sh
 tests/run-host-tests.sh
@@ -109,4 +122,4 @@ tests/run-host-tests.sh
 
 串口配置测试覆盖端口和长度边界、异常命令、密码空格、清空凭据，以及修改地址时保留其他参数。刷入已有设备前备份 flash，确认分区一致后只更新应用分区，以保留 Wi-Fi 和 SPIFFS 配置；启动或配置应用不会自动发送空调开关信号。
 
-帧字段参考 [IRremoteESP8266 #1060](https://github.com/crankyoldgit/IRremoteESP8266/issues/1060) 及作者的 [原始捕获表](https://docs.google.com/spreadsheets/d/1x82Cb3-GtOMM5oTVOFdNY9mqwLnJ-qElhOj8MId7mrA/edit)。当前两条 25℃除湿帧均已在用户面板上验证。
+帧字段参考 [IRremoteESP8266 #1060](https://github.com/crankyoldgit/IRremoteESP8266/issues/1060) 及作者的 [原始捕获表](https://docs.google.com/spreadsheets/d/1x82Cb3-GtOMM5oTVOFdNY9mqwLnJ-qElhOj8MId7mrA/edit)。完整 23 字节状态帧的第 15 字节（从 0 开始）为 `2 × 温度 - 13`，第 16 字节为反码。两条 25℃除湿帧已在用户面板上验证；新增温度字段已通过捕获数据和软件测试，现场响应待验证。

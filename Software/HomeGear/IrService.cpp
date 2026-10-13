@@ -17,17 +17,19 @@ IRsend &sender() { static IRsend output(kIrLed); return output; }
 namespace {
 #if (IR_MODULE && IR_HITACHI_AC3)
 ESP32MQTTClient &mqttClient = mqtt::client();
-HAMqttDiscoveryHandler hamdhHitachi("homegear_ir", device::chipId() + "_hitachi_ac3", "Hitachi", "Hitachi AC3 25 C Dry", SOFTWARE_VERSION, mqtt::discovery());
+HAMqttDiscoveryHandler hamdhHitachi("homegear_ir", device::chipId() + "_hitachi_ac3", "Hitachi", "Hitachi AC3 Dry", SOFTWARE_VERSION, mqtt::discovery());
 HitachiAc3Control hitachiAc3;
 QueueHandle_t hitachiAc3Queue = nullptr;
 const uint8_t kHitachiAc3OnEvent = 1;
 const uint8_t kHitachiAc3OffEvent = 2;
 const uint8_t kHitachiAc3PublishEvent = 3;
+const uint8_t kHitachiAc3TemperatureEvent = 4;
+struct HitachiEvent { uint8_t type; uint8_t temperature; };
 IRsend &irsend = sender();
 // Only loop() reads or changes command state, sends IR and publishes snapshots.
 String hitachiAc3Feedback()
 {
-  StaticJsonDocument<256> feedback;
+  StaticJsonDocument<384> feedback;
   feedback["achitachi_mode"] = hitachiAc3.getMode();
   feedback["achitachi_temperature"] = hitachiAc3.getTemperature();
   feedback["achitachi_fan_mode"] = hitachiAc3.getFanMode();
@@ -36,6 +38,9 @@ String hitachiAc3Feedback()
   else
     feedback["achitachi_power"] = nullptr;
   feedback["state_source"] = hitachiAc3.getStateSource();
+  // IR reports the requested setpoint, never an observed room temperature.
+  feedback["achitachi_current_temperature"] = nullptr;
+  feedback["current_temperature_source"] = "unavailable";
   String payload;
   serializeJson(feedback, payload);
   return payload;
@@ -43,17 +48,18 @@ String hitachiAc3Feedback()
 
 void publishHitachiAc3State()
 {
-  if (hitachiAc3.isKnown() && mqttClient.isConnected())
+  if (mqttClient.isConnected())
     mqttClient.publish(hamdhHitachi.getStateTopic(), hitachiAc3Feedback(), 0, true);
 }
 
-bool enqueueHitachiAc3Event(uint8_t event)
+bool enqueueHitachiAc3Event(uint8_t type, uint8_t temperature = 0)
 {
   if (!hitachiAc3Queue)
   {
     Serial.println("HITACHI ERROR NOT_INITIALIZED");
     return false;
   }
+  const HitachiEvent event = {type, temperature};
   if (xQueueSend(hitachiAc3Queue, &event, 0) != pdTRUE)
   {
     Serial.println("HITACHI ERROR COMMAND_QUEUE_FULL");
@@ -67,22 +73,43 @@ bool commandHitachiAc3(bool power)
   return enqueueHitachiAc3Event(power ? kHitachiAc3OnEvent : kHitachiAc3OffEvent);
 }
 
+bool temperatureHitachiAc3(int degrees)
+{
+  if (degrees < HitachiAc3Control::kMinTemperature || degrees > HitachiAc3Control::kMaxTemperature)
+  {
+    Serial.println("HITACHI ERROR TEMPERATURE_OUT_OF_RANGE");
+    return false;
+  }
+  return enqueueHitachiAc3Event(kHitachiAc3TemperatureEvent, static_cast<uint8_t>(degrees));
+}
+
 void processHitachiAc3Event()
 {
-  uint8_t event;
+  HitachiEvent event;
   if (!hitachiAc3Queue || xQueueReceive(hitachiAc3Queue, &event, 0) != pdTRUE) return;
-  if (event == kHitachiAc3PublishEvent)
+  if (event.type == kHitachiAc3PublishEvent)
   {
     publishHitachiAc3State();
     return;
   }
-  if (event != kHitachiAc3OnEvent && event != kHitachiAc3OffEvent) return;
+  if (event.type == kHitachiAc3TemperatureEvent && !hitachiAc3.isKnown())
+  {
+    // An unknown power state must not become OFF merely to set a temperature.
+    // Stage the target until an explicit mode command supplies absolute power.
+    hitachiAc3.setTemperature(event.temperature);
+  }
+  else if (event.type == kHitachiAc3OnEvent || event.type == kHitachiAc3OffEvent ||
+           event.type == kHitachiAc3TemperatureEvent)
   {
     power::ScopedIrClock clock;
     if (!clock.ready()) { Serial.println("HITACHI ERROR IR_CLOCK_UNAVAILABLE"); return; }
-    hitachiAc3.setPower(event == kHitachiAc3OnEvent);
+    if (event.type == kHitachiAc3TemperatureEvent)
+      hitachiAc3.setTemperature(event.temperature);
+    else
+      hitachiAc3.setPower(event.type == kHitachiAc3OnEvent);
     irsend.sendHitachiAc3(hitachiAc3.getRaw(), HitachiAc3Control::kStateLength, 0);
   }
+  else return;
   publishHitachiAc3State();
 #if SERIAL_DEBUG
   Serial.print("HITACHI ");
@@ -97,13 +124,16 @@ void printHitachiAc3State()
 
 void handleHitachiAc3Command(const String &payload)
 {
-  bool power;
-  if (!HitachiAc3Control::parseModeCommand(payload.c_str(), payload.length(), power))
+  HitachiAc3Control::Command command;
+  if (!HitachiAc3Control::parseCommand(payload.c_str(), payload.length(), command))
   {
-    Serial.println("HITACHI ERROR EXPECTED_ONLY_LITERAL_MODE_DRY_OR_OFF");
+    Serial.println("HITACHI ERROR EXPECTED_SINGLE_MODE_OR_TEMPERATURE");
     return;
   }
-  commandHitachiAc3(power);
+  if (command.type == HitachiAc3Control::Command::Type::Mode)
+    commandHitachiAc3(command.power);
+  else
+    temperatureHitachiAc3(command.temperature);
 }
 #endif
 }
@@ -112,7 +142,7 @@ void begin() {
   sender().begin();
 #endif
 #if (IR_MODULE && IR_HITACHI_AC3)
-  hitachiAc3Queue = xQueueCreate(8, sizeof(uint8_t));
+  hitachiAc3Queue = xQueueCreate(8, sizeof(HitachiEvent));
   if (!hitachiAc3Queue) Serial.println("HITACHI ERROR QUEUE_ALLOCATION_FAILED");
 #endif
 }
@@ -129,6 +159,14 @@ bool command(bool power) {
   return false;
 #endif
 }
+bool temperature(int degrees) {
+#if (IR_MODULE && IR_HITACHI_AC3)
+  return temperatureHitachiAc3(degrees);
+#else
+  (void)degrees;
+  return false;
+#endif
+}
 void printStatus() {
 #if (IR_MODULE && IR_HITACHI_AC3)
   printHitachiAc3State();
@@ -139,14 +177,36 @@ void printStatus() {
 void onConnected() {
 #if (IR_MODULE && IR_HITACHI_AC3)
   HAMqttDiscoveryClimate hamdhHitachiAC(hamdhHitachi);
+  // Keep the existing discovery topic and unique ID when adding capabilities.
   hamdhHitachiAC.setDeviceNameMin("hitachi_ac3_25c_dry");
   hamdhHitachiAC.setModeCommandTemplate("{\"achitachi_mode\": \"{{ value }}\"}");
-  hamdhHitachiAC.setModeStateTemplate("{{ value_json.achitachi_mode }}");
+  hamdhHitachiAC.setModeStateTemplate("{{ value_json.achitachi_mode if value_json.achitachi_mode in ['off', 'dry'] else 'None' }}");
+  hamdhHitachiAC.setTemperatureCommandTemplate("{\"achitachi_temperature\": {{ value }}}");
+  hamdhHitachiAC.setTemperatureStateTemplate("{{ value_json.achitachi_temperature }}");
+  hamdhHitachiAC.setMinTemp(HitachiAc3Control::kMinTemperature);
+  hamdhHitachiAC.setMaxTemp(HitachiAc3Control::kMaxTemperature);
+  hamdhHitachiAC.setTemperatureUnit("C");
   String hitachiModes[10] = {"off", "dry", "", "", "", "", "", "", "", ""};
   hamdhHitachiAC.setModes(hitachiModes);
-  // Fixed 25 C and low fan are attributes, not adjustable HA capabilities.
   hamdhHitachiAC.construct();
-  mqttClient.publish(hamdhHitachiAC.getMqttDiscoveryConfigTopic(), hamdhHitachiAC.getMqttDiscoveryMesg(), 0, true);
+  // Extend the pinned discovery library without editing its vendor files.
+  DynamicJsonDocument discovery(3072);
+  if (deserializeJson(discovery, hamdhHitachiAC.getMqttDiscoveryMesg()) == DeserializationError::Ok)
+  {
+    discovery["name"] = "Hitachi AC3 Dry";
+    discovery["initial"] = static_cast<int>(HitachiAc3Control::kDefaultTemperature);
+    discovery["temp_step"] = 1;
+    discovery["precision"] = 1.0;
+    discovery["optimistic"] = false;
+    discovery["current_temperature_topic"] = hamdhHitachi.getStateTopic();
+    // HA resets on the literal 'None'; an empty string or 'null' is ignored.
+    discovery["current_temperature_template"] = "{{ 'None' }}";
+    String payload;
+    if (!discovery.overflowed() && serializeJson(discovery, payload))
+      mqttClient.publish(hamdhHitachiAC.getMqttDiscoveryConfigTopic(), payload, 0, true);
+    else Serial.println("HITACHI ERROR DISCOVERY_SERIALIZATION");
+  }
+  else Serial.println("HITACHI ERROR DISCOVERY_JSON");
   mqttClient.subscribe(hamdhHitachi.getCtrlTopic(), [](const String &payload) { handleHitachiAc3Command(payload); });
   // Schedule a loop-owned snapshot; reconnect never resets state or sends IR.
   enqueueHitachiAc3Event(kHitachiAc3PublishEvent);
