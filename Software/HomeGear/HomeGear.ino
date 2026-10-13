@@ -802,7 +802,6 @@ void modulesStart()
 
 #if ZGB_MODULE
   zgbSerial.begin(115200);
-  ser2NetServer.begin();
 #endif
 }
 
@@ -820,6 +819,10 @@ void setup()
   // Serial control and sensors must work while Wi-Fi provisioning is pending.
   modulesStart();
   wmStart();
+#if ZGB_MODULE
+  // WiFiManager initializes lwIP before the TCP server is created.
+  ser2NetServer.begin();
+#endif
   if (WiFi.status() == WL_CONNECTED && mqtt_server[0]) mqttStart();
 
   startLoopMs = millis();
