@@ -710,7 +710,8 @@ void wmStart()
   syncPortalConfig();
   wifiManager.setDebugOutput(false);
   wifiManager.setConfigPortalBlocking(false);
-  wifiManager.setConnectTimeout(1);
+  // Allow association and DHCP to finish before falling back to the portal.
+  wifiManager.setConnectTimeout(10);
   wifiManager.setSaveConfigCallback(saveConfigCallback);
   wifiManager.setSaveParamsCallback(saveConfigCallback);
 #if ZGB_MODULE

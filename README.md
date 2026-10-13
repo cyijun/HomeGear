@@ -43,7 +43,7 @@ Home Assistant MQTT Discovery 会生成 `hitachi_ac3_25c_dry` climate 实体，�
 
 ### 串口配置服务器
 
-串口配置在 Wi-Fi 未连接时也可使用。115200 波特率，每条命令以换行结束：
+启动时先尝试连接已保存的 Wi-Fi，初次连接等待上限为 10 秒；随后即使 Wi-Fi 未连接，也可使用串口配置和非阻塞配网门户。115200 波特率，每条命令以换行结束：
 
 ```text
 config show
