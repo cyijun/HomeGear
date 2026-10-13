@@ -32,6 +32,8 @@ void showSerialConfig()
   Serial.printf("CONFIG active_homeassistant_port=%s\n", activeConfig.homeassistant_port);
   wifi::printStatus();
   Serial.printf("CONFIG mqtt_connected=%s\n", mqtt::client().isConnected() ? "true" : "false");
+  Serial.printf("CONFIG mqtt_client_id=%s\n", mqtt::clientId());
+  Serial.printf("CONFIG mqtt_connection_count=%lu\n", static_cast<unsigned long>(mqtt::connectionCount()));
   Serial.println("CONFIG END");
 }
 

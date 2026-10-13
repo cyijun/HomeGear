@@ -9,6 +9,7 @@
 #include <SPIFFS.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include <atomic>
 namespace homegear { namespace mqtt {
 ESP32MQTTClient &client() { static ESP32MQTTClient value; return value; }
 HAMqttDiscoveryHandler &discovery() { static HAMqttDiscoveryHandler value(PLATFORM, device::chipId(), MANUFACTURER, DEVICE_MODEL, SOFTWARE_VERSION); return value; }
@@ -16,6 +17,7 @@ namespace {
 String mqttUri;
 bool mqttStarted = false;
 bool initialized = false;
+std::atomic<uint32_t> successfulConnections{0};
 QueueHandle_t systemQueue = nullptr;
 const String &availability() { static const String value = discovery().getAvailabilityTopic(); return value; }
 void queueSystem(uint8_t command) {
@@ -42,6 +44,11 @@ void mqttStart()
 }
 
 }
+uint32_t connectionCount() { return successfulConnections.load(std::memory_order_relaxed); }
+const char *clientId() {
+  const char *name = client().getClientName();
+  return name ? name : "";
+}
 void begin() {
   if (!initialized) {
     initialized = true;
@@ -61,6 +68,7 @@ void tick() {
   }
 }
 void connected() {
+  successfulConnections.fetch_add(1, std::memory_order_relaxed);
   client().publish(availability().c_str(), "online", 0, true);
   client().subscribe(discovery().getCmdTopic(), [](const String &payload) {
     if (payload == "reboot") queueSystem(1);
