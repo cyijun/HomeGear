@@ -10,6 +10,7 @@ void begin();
 void tick();
 void onConnected();
 bool command(bool power);
+bool temperature(int degrees);
 void printStatus();
 bool acceptMqttEvent(esp_mqtt_event_handle_t event);
 #if IR_MODULE

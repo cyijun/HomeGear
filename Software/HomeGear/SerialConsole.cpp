@@ -74,6 +74,14 @@ void dispatchSerialCommand(const char *line, size_t length)
   if (cmd == "hitachi_on") ir::command(true);
   else if (cmd == "hitachi_off") ir::command(false);
   else if (cmd == "hitachi_status") ir::printStatus();
+  else if (cmd == "hitachi_temp" || cmd.startsWith("hitachi_temp "))
+  {
+    const String value = cmd.substring(13);
+    if (value.length() != 2 || value[0] < '0' || value[0] > '9' || value[1] < '0' || value[1] > '9')
+      Serial.println("HITACHI ERROR EXPECTED_INTEGER_TEMPERATURE");
+    else
+      ir::temperature((value[0] - '0') * 10 + value[1] - '0');
+  }
   else
 #endif
   if (cmd == "power status") power::printStatus();
