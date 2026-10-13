@@ -5,6 +5,22 @@ An ESP32 based scalable smart home hardware stack
 
 `HomeGear.ino` 只保留启动顺序和循环调度；编译开关集中在 `Software/HomeGear/HomeGearConfig.h`。配置、配网、MQTT/HA、串口、传感器、红外、旧遥控协议和 ZigBee 转发分别由独立模块负责。
 
+代码按职责组织，新增功能时优先扩展对应模块：
+
+| 文件 | 职责 |
+| --- | --- |
+| `HomeGear.ino` / `HomeGearConfig.h` | 启动顺序、循环调度 / 编译开关 |
+| `ConfigStore` / `SerialConfig` / `SerialConsole` | 配置持久化 / 命令解析 / 串口交互 |
+| `WifiService` / `WifiPortalPolicy` | Wi-Fi 恢复与配网门户 / 门户回收条件 |
+| `MqttService` / `DeviceInfo` | MQTT 连接与系统命令 / 设备标识 |
+| `SensorService` / `SensorSnapshot` / `TrackedBsec` | 传感器采样和发布 / 快照与上报策略 / BSEC 输出跟踪 |
+| `IrService` / `HitachiAc3Control` | 日立命令队列与发送 / 已验证的帧及解析 |
+| `LegacyRemotes` 与各品牌遥控模块 | 旧协议的统一队列和调度 / 各品牌的发现、解析与控制 |
+| `PowerPolicy` | 常态时钟、循环等待及红外发送期间的时钟恢复 |
+| `ZigbeeBridge` / `ZigbeeBridgeBuffer` | 独立任务中的 TCP/UART 转发 / 有界缓冲 |
+
+旧遥控协议按格力、美的、Coolix、海尔、先锋风扇和飞利浦风扇灯分别放在独立 `.cpp` 中；RF 串口传输也独立管理。MQTT 回调只把旧协议命令加入同一个有界队列，由主循环顺序执行。每个品牌通过自己的编译开关启用；默认仍只启用实测的日立协议。传感器、配网和配置保存保留各自完整的状态管理，避免跨文件共享可变状态。
+
 - CPU 常态运行在 **160 MHz**，主循环每轮等待 **2 ms**。日立等红外发射时临时恢复 **240 MHz**，沿用已验证的库载波时序，发射后恢复；启动及 MQTT 重连不自动发射红外。
 - Wi-Fi 稳定连接 30 秒，且没有配网客户端、HTTP 请求或最近 45 秒内的配置提交时，自动关闭遗留配网 AP。Wi-Fi 保持 `MIN_MODEM` 省电和 MQTT 在线；当前锁定核心未开启自动 Light-sleep。
 - ZigBee TCP `1234` 转发使用独立任务，在双核 ESP32 上与主循环分属两核。UART2 接收/发送缓冲为 4096/1024 字节，双向各有 4096 字节队列，保留部分写入并处理背压。移除了会清空 TCP 接收数据的 `WiFiClient.flush()`；网络长期不读取时仍受有限缓冲限制。
