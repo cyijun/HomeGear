@@ -26,6 +26,7 @@
 #include <Wire.h>
 #include <FS.h>
 #include <WiFiManager.h>
+#include <esp_wifi.h>
 #include <SPIFFS.h>
 #include <ArduinoJson.h>
 #include <freertos/FreeRTOS.h>
@@ -452,6 +453,13 @@ void protectWiFiPortalSave()
   wifiPortalSaveStartedMs = millis();
 }
 
+bool hasSavedWiFiSettings()
+{
+  // Check only presence; never construct or log credential strings.
+  wifi_config_t saved = {};
+  return esp_wifi_get_config(WIFI_IF_STA, &saved) == ESP_OK && saved.sta.ssid[0] != 0;
+}
+
 void processWiFiRecovery()
 {
   WiFiRecoveryEvent update;
@@ -518,7 +526,7 @@ void processWiFiRecovery()
   // Allow association/DHCP to progress, but bound a stalled attempt.
   if (wifiAttemptPending && static_cast<uint32_t>(now - wifiAttemptStartedMs) < kWiFiAttemptLimitMs) return;
   if (!wifiInitialRetry && static_cast<uint32_t>(now - wifiLastRetryMs) < kWiFiRetryIntervalMs) return;
-  if (!wifiManager.getWiFiIsSaved())
+  if (!hasSavedWiFiSettings())
   {
     wifiInitialRetry = false;
     wifiLastRetryMs = now;
