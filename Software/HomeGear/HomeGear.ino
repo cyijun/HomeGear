@@ -26,8 +26,11 @@
 #include <Wire.h>
 #include <FS.h>
 #include <WiFiManager.h>
+#include <esp_wifi.h>
 #include <SPIFFS.h>
 #include <ArduinoJson.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 #include "SerialConfig.h"
 #include "HAMDHandler.h"
 #include "ESP32MQTTClient.h"
@@ -158,8 +161,6 @@ IRsend irsend(kIrLed);
 
 #if IR_HITACHI_AC3
 #include <ir_Hitachi.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/queue.h>
 #include "HitachiAc3Control.h"
 HAMqttDiscoveryHandler hamdhHitachi("homegear_ir", chipId + "_hitachi_ac3", "Hitachi", "Hitachi AC3 25 C Dry", SOFTWARE_VERSION, hamdhHG);
 HitachiAc3Control hitachiAc3;
@@ -383,6 +384,25 @@ bool mqttStarted = false;
 String mqttUri;
 const size_t kMaxConfigFileLength = 4096;
 WiFiManager wifiManager;
+const uint32_t kWiFiRetryIntervalMs = 30000;
+const uint32_t kWiFiAttemptLimitMs = 45000;
+const uint32_t kWiFiPortalSaveGuardMs = 45000;
+struct WiFiRecoveryEvent
+{
+  uint32_t eventId;
+  uint32_t atMs;
+  uint8_t reason;
+};
+QueueHandle_t wifiRecoveryQueue = nullptr;
+uint8_t wifiLastDisconnectReason = 0;
+uint32_t wifiRetryCount = 0;
+uint32_t wifiLastRetryMs = 0;
+uint32_t wifiAttemptStartedMs = 0;
+uint32_t wifiPortalSaveStartedMs = 0;
+bool wifiAttemptPending = false;
+bool wifiAssociated = false;
+bool wifiInitialRetry = false;
+bool wifiPortalSavePending = false;
 WiFiManagerParameter custom_mqtt_server("mqttserver", "MQTT Server", mqtt_server, SERVER_ADDR_LEN);
 WiFiManagerParameter custom_mqtt_port("mqttport", "MQTT Port", mqtt_port, NW_PORT_LEN);
 WiFiManagerParameter custom_mqtt_user("mqttuser", "MQTT Username", mqtt_user, USER_PWD_LEN);
@@ -390,6 +410,141 @@ WiFiManagerParameter custom_mqtt_pwd("mqttpwd", "MQTT Password", mqtt_pwd, USER_
 WiFiManagerParameter custom_homeassistant_server("homeassistantserver", "Home Assistant Server", homeassistant_server, SERVER_ADDR_LEN);
 WiFiManagerParameter custom_homeassistant_port("homeassistantport", "Home Assistant Port", homeassistant_port, NW_PORT_LEN);
 WiFiManagerParameter custom_homeassistant_token("homeassistanttoken", "Home Assistant Token", homeassistant_token, TOKEN_LEN, "type='password'");
+
+// The ESP32 event task only queues diagnostics; Wi-Fi recovery runs in loop().
+void recordWiFiRecoveryEvent(WiFiEvent_t event, WiFiEventInfo_t info)
+{
+  switch (event)
+  {
+    case ARDUINO_EVENT_WIFI_STA_START:
+    case ARDUINO_EVENT_WIFI_STA_STOP:
+    case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+    case ARDUINO_EVENT_WIFI_STA_LOST_IP:
+      break;
+    default:
+      return;
+  }
+  if (!wifiRecoveryQueue) return;
+  WiFiRecoveryEvent update = {static_cast<uint32_t>(event), millis(),
+      event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED ? info.wifi_sta_disconnected.reason : static_cast<uint8_t>(0)};
+  if (xQueueSend(wifiRecoveryQueue, &update, 0) != pdTRUE)
+  {
+    // Keep recent events if a burst fills the bounded diagnostic queue.
+    WiFiRecoveryEvent discarded;
+    xQueueReceive(wifiRecoveryQueue, &discarded, 0);
+    xQueueSend(wifiRecoveryQueue, &update, 0);
+  }
+}
+
+void initializeWiFiRecovery()
+{
+  wifiRecoveryQueue = xQueueCreate(16, sizeof(WiFiRecoveryEvent));
+  if (!wifiRecoveryQueue) Serial.println("WIFI ERROR EVENT_QUEUE_ALLOCATION_FAILED");
+  else WiFi.onEvent(recordWiFiRecoveryEvent);
+  wifiLastRetryMs = millis();
+}
+
+void protectWiFiPortalSave()
+{
+  // HTTP save and its connection attempt span successive process() calls.
+  wifiPortalSavePending = true;
+  wifiPortalSaveStartedMs = millis();
+}
+
+bool hasSavedWiFiSettings()
+{
+  // Check only presence; never construct or log credential strings.
+  wifi_config_t saved = {};
+  return esp_wifi_get_config(WIFI_IF_STA, &saved) == ESP_OK && saved.sta.ssid[0] != 0;
+}
+
+void processWiFiRecovery()
+{
+  WiFiRecoveryEvent update;
+  while (wifiRecoveryQueue && xQueueReceive(wifiRecoveryQueue, &update, 0) == pdTRUE)
+  {
+    Serial.printf("WIFI EVENT id=%lu reason=%u ms=%lu\n",
+        static_cast<unsigned long>(update.eventId), update.reason,
+        static_cast<unsigned long>(update.atMs));
+    switch (update.eventId)
+    {
+      case ARDUINO_EVENT_WIFI_STA_START:
+        wifiAssociated = false;
+        wifiAttemptPending = true;
+        wifiAttemptStartedMs = update.atMs;
+        break;
+      case ARDUINO_EVENT_WIFI_STA_STOP:
+        wifiAssociated = false;
+        wifiAttemptPending = false;
+        break;
+      case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+      case ARDUINO_EVENT_WIFI_STA_LOST_IP:
+        wifiAssociated = true;
+        wifiAttemptPending = true;
+        wifiAttemptStartedMs = update.atMs;
+        break;
+      case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+        wifiLastDisconnectReason = update.reason;
+        wifiAssociated = false;
+        // Core auto-reconnect may already be associating again after this event.
+        wifiAttemptPending = true;
+        wifiAttemptStartedMs = update.atMs;
+        break;
+      case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+        wifiAssociated = true;
+        wifiAttemptPending = false;
+        break;
+    }
+  }
+
+  const uint32_t now = millis();
+  const wl_status_t status = WiFi.status();
+  const bool staEnabled = (WiFi.getMode() & WIFI_STA) != 0;
+  // Current core bits also protect DHCP if a diagnostic event was dropped.
+  wifiAssociated = staEnabled && (WiFi.getStatusBits() & STA_CONNECTED_BIT) != 0;
+  if (status == WL_CONNECTED)
+  {
+    wifiAttemptPending = false;
+    wifiInitialRetry = false;
+    // Keep a just-submitted portal save guarded even if the old AP is connected.
+    return;
+  }
+  if (!staEnabled) wifiAttemptPending = false;
+  else if ((wifiAssociated || status == WL_IDLE_STATUS) && !wifiAttemptPending)
+  {
+    wifiAttemptPending = true;
+    wifiAttemptStartedMs = now;
+  }
+
+  if (wifiPortalSavePending)
+  {
+    if (static_cast<uint32_t>(now - wifiPortalSaveStartedMs) < kWiFiPortalSaveGuardMs) return;
+    wifiPortalSavePending = false;
+  }
+  // Allow association/DHCP to progress, but bound a stalled attempt.
+  if (wifiAttemptPending && static_cast<uint32_t>(now - wifiAttemptStartedMs) < kWiFiAttemptLimitMs) return;
+  if (!wifiInitialRetry && static_cast<uint32_t>(now - wifiLastRetryMs) < kWiFiRetryIntervalMs) return;
+  if (!hasSavedWiFiSettings())
+  {
+    wifiInitialRetry = false;
+    wifiLastRetryMs = now;
+    return;
+  }
+
+  wifiInitialRetry = false;
+  wifiLastRetryMs = now;
+  wifiAttemptStartedMs = now;
+  wifiAttemptPending = true;
+  ++wifiRetryCount;
+  // begin() adds STA to the existing AP mode and uses saved credentials.
+  // Avoid disconnect/reconnect or a second autoConnect/config portal.
+  const wl_status_t result = WiFi.begin();
+  Serial.printf("WIFI RETRY count=%lu status=%u mode=%u\n",
+      static_cast<unsigned long>(wifiRetryCount), static_cast<unsigned int>(result),
+      static_cast<unsigned int>(WiFi.getMode()));
+}
 
 void saveConfigCallback()
 {
@@ -625,6 +780,11 @@ void showSerialConfig()
   Serial.printf("CONFIG active_homeassistant_server=%s\n", homeassistant_server);
   Serial.printf("CONFIG active_homeassistant_port=%s\n", homeassistant_port);
   Serial.printf("CONFIG wifi_connected=%s\n", WiFi.status() == WL_CONNECTED ? "true" : "false");
+  Serial.printf("CONFIG wifi_status=%u\n", static_cast<unsigned int>(WiFi.status()));
+  Serial.printf("CONFIG wifi_mode=%u\n", static_cast<unsigned int>(WiFi.getMode()));
+  Serial.printf("CONFIG wifi_last_disconnect_reason=%u\n", wifiLastDisconnectReason);
+  Serial.printf("CONFIG wifi_portal_active=%u\n", wifiManager.getConfigPortalActive() ? 1U : 0U);
+  Serial.printf("CONFIG wifi_retry_count=%lu\n", static_cast<unsigned long>(wifiRetryCount));
   Serial.printf("CONFIG local_ip=%s\n", WiFi.localIP().toString().c_str());
   Serial.printf("CONFIG mqtt_connected=%s\n", mqttClient.isConnected() ? "true" : "false");
   Serial.println("CONFIG END");
@@ -710,7 +870,9 @@ void wmStart()
   syncPortalConfig();
   wifiManager.setDebugOutput(false);
   wifiManager.setConfigPortalBlocking(false);
-  wifiManager.setConnectTimeout(1);
+  // Allow association and DHCP to finish before falling back to the portal.
+  wifiManager.setConnectTimeout(10);
+  wifiManager.setPreSaveConfigCallback(protectWiFiPortalSave);
   wifiManager.setSaveConfigCallback(saveConfigCallback);
   wifiManager.setSaveParamsCallback(saveConfigCallback);
 #if ZGB_MODULE
@@ -724,6 +886,8 @@ void wmStart()
   wifiManager.addParameter(&custom_homeassistant_port);
   wifiManager.addParameter(&custom_homeassistant_token);
   wifiManager.autoConnect(nodename, "homegearconfig");
+  // A portal fallback has disabled STA; safely restart saved STA once in loop().
+  wifiInitialRetry = WiFi.status() != WL_CONNECTED && (WiFi.getMode() & WIFI_STA) == 0;
   Serial.println("CONFIG SERIAL_READY");
 }
 
@@ -818,6 +982,7 @@ void setup()
   loadConfigFromFS();
   // Serial control and sensors must work while Wi-Fi provisioning is pending.
   modulesStart();
+  initializeWiFiRecovery();
   wmStart();
 #if ZGB_MODULE
   // WiFiManager initializes lwIP before the TCP server is created.
@@ -1510,8 +1675,9 @@ void pubSensorsData()
 
 void loop()
 {
-  processSerialCommands();
   wifiManager.process();
+  processWiFiRecovery();
+  processSerialCommands();
   if (shouldSaveConfig)
   {
     shouldSaveConfig = false;

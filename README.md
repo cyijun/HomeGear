@@ -43,7 +43,7 @@ Home Assistant MQTT Discovery 会生成 `hitachi_ac3_25c_dry` climate 实体，�
 
 ### 串口配置服务器
 
-串口配置在 Wi-Fi 未连接时也可使用。115200 波特率，每条命令以换行结束：
+启动时先尝试连接已保存的 Wi-Fi，初次连接等待上限为 10 秒；随后即使 Wi-Fi 未连接，也可使用串口配置和非阻塞配网门户。后台会使用已保存凭据恢复连接，不会关闭配网 AP；正在关联、等待 DHCP 或刚提交配网时会暂缓重试。115200 波特率，每条命令以换行结束：
 
 ```text
 config show
@@ -52,7 +52,7 @@ config set mqtt_server 192.168.0.109
 config apply
 ```
 
-`config show` 显示暂存配置、当前生效的服务器地址及网络连接状态，密码和令牌只显示 `set/empty`。`config set <参数名> <值>` 暂存修改，`config save` 保存到 SPIFFS，`config apply` 保存成功后重启并应用。暂存或保存不会修改正在使用的 MQTT 连接参数；只改服务器地址会保留端口、账号、密码和令牌。保存使用临时文件和备份文件，文件系统不可用时报告错误，不自动格式化。
+`config show` 显示暂存配置、当前生效的服务器地址及网络连接状态，也包含 Wi-Fi 状态、模式、最近断连原因和后台重试次数；密码和令牌只显示 `set/empty`。`config set <参数名> <值>` 暂存修改，`config save` 保存到 SPIFFS，`config apply` 保存成功后重启并应用。暂存或保存不会修改正在使用的 MQTT 连接参数；只改服务器地址会保留端口、账号、密码和令牌。保存使用临时文件和备份文件，文件系统不可用时报告错误，不自动格式化。
 
 支持 `mqtt_server`、`mqtt_port`、`mqtt_user`、`mqtt_pwd`、`homeassistant_server`、`homeassistant_port`、`homeassistant_token`。服务器填写 IP 或主机名，不含 `http://`、路径或端口；端口范围为 1–65535。服务器最长 63 字节，用户名/密码最长 31 字节，令牌最长 255 字节。参数名后第一个空格分隔值，后面的空格属于值，密码的首尾空格会保留；使用 `config set mqtt_pwd ""` 可清空密码，令牌同理。
 
