@@ -14,6 +14,7 @@ An ESP32 based scalable smart home hardware stack
 | `WifiService` / `WifiPortalPolicy` | Wi-Fi 恢复与配网门户 / 门户回收条件 |
 | `MqttService` / `DeviceInfo` | MQTT 连接与系统命令 / 设备标识 |
 | `SensorService` / `SensorSnapshot` / `TrackedBsec` | 传感器采样和发布 / 快照与上报策略 / BSEC 输出跟踪 |
+| `RoomTemperature` | 温湿度模组的室温有效性、过期和独立 MQTT 发布 |
 | `IrService` / `HitachiAc3Control` | 日立命令队列与发送 / 已验证的帧及解析 |
 | `LegacyRemotes` 与各品牌遥控模块 | 旧协议的统一队列和调度 / 各品牌的发现、解析与控制 |
 | `PowerPolicy` | 常态时钟、循环等待及红外发送期间的时钟恢复 |
@@ -72,14 +73,22 @@ Home Assistant MQTT Discovery 会生成 climate 实体，提供 `off`、`dry` �
 反馈主题为 `homegear_ir/<chipId>_hitachi_ac3/attr`。反馈是完整的 retained JSON，例如：
 
 ```json
-{"achitachi_mode":"dry","achitachi_temperature":25,"achitachi_fan_mode":"low","achitachi_power":true,"state_source":"commanded","achitachi_current_temperature":null,"current_temperature_source":"unavailable"}
+{"achitachi_mode":"dry","achitachi_temperature":25,"achitachi_fan_mode":"low","achitachi_power":true,"state_source":"commanded","achitachi_current_temperature":24.6,"current_temperature_source":"shtc3"}
 ```
 
 这是软件的目标及最近命令记录，红外控制没有空调状态回读。启动会发布 `unknown` 模式、`null` 电源和 25℃默认目标，重连重发当前软件快照，均不发红外。调温时完整状态帧中的电源来自最近的软件命令；如果之后用墙面面板改变了电源，软件无法知道，下一次调温可能恢复软件记录的开关状态。MQTT 与串口命令进入同一队列，由主循环按顺序执行，避免帧交叠及状态发布乱序。
 
-`achitachi_temperature` 是目标设定，`achitachi_current_temperature` 是当前室温，后者明确为 `null`，不借用目标或 HomeGear 的传感器读数。HA 通过 `current_temperature_template: "{{ 'None' }}"` 清空当前室温；`initial: 25` 和目标温度 state topic 避免目标退回 HA 的 21℃默认值。HA MQTT climate 的空值必须渲染为字符串 `None`，空字符串或裸 `null` 不会清空。[HA 官方说明](https://www.home-assistant.io/integrations/climate.mqtt/)
+### 1.3：温湿度模组作为空调当前室温
 
-HA 内置 HomeKit Bridge 的 `CurrentTemperature` 初值为 21℃，只在收到有效数字时更新；室温未知时 HomeKit 可能继续显示 21℃或最后一个有效值。普通 MQTT Discovery 不能把这个 HomeKit 特征改成空值，本项目保留 HA 中的真实未知状态。[HomeKit Bridge 稳定版实现](https://github.com/home-assistant/core/blob/2026.10.1/homeassistant/components/homekit/climate_base.py#L153)
+插入并启用温湿度模组（`THI_MODULE`，默认开启）后，SHTC3 的有效读数会自动成为日立 climate 的当前室温。室温按 0.1℃精度显示，目标温度仍以 1℃步进调节；两者独立。室温测量不会改变目标、开关、模式或风速，也不发送红外。HomeGear 应放在所控制空调的房间内；空气质量模组 BME680 带加热器，不自动作为室温备用来源。
+
+独立 MQTT 主题为 `homegear/<chipId>/attr/room_temperature`，消息为摄氏数值（例如 `24.60`）或精确字符串 `None`，使用 retain。Discovery 自动指向该主题，沿用原实体 ID，无需 HA 自动化或额外的模板空调。首次有效值、可用性变化、MQTT 重连和 `pubdata` 请求会立即同步；普通变化达到 0.1℃后，最短 15 秒上报，心跳 300 秒，发布失败按 1 秒重试。
+
+无温湿度模组、未取得有效样本、读取/CRC/范围校验失败时，当前室温为未知；最后成功采样超过 10 秒也视为过期，并发布 retained `None` 清除旧值。采样继续按原来的 2 秒调度，恢复有效读数后自动恢复室温。目标温度不会用于填充未知室温。HA MQTT climate 使用字符串 `None` 清空当前温度，空字符串或裸 `null` 不会清空。[HA 官方说明](https://www.home-assistant.io/integrations/climate.mqtt/)
+
+命令/诊断 JSON 中的 `achitachi_temperature` 是目标设定；`achitachi_current_temperature` 是生成该快照时的 SHTC3 室温，没有有效读数时为 `null`，`current_temperature_source` 为 `unavailable`。持续更新的 HA `current_temperature` 以独立室温主题为准。串口 `sensors status` 可查看来源、室温及过期时限。`initial: 25` 和目标温度 state topic 保留启动默认目标。
+
+HA 内置 HomeKit Bridge 收到有效的 HA 当前室温后会更新显示；它的 `CurrentTemperature` 初值为 21℃，室温未知时可能保留 21℃或最后一个有效值。普通 MQTT Discovery 不能把这个 HomeKit 特征改成空值，本项目在 HA 中保留真实的可用性。[HomeKit Bridge 实现](https://github.com/home-assistant/core/blob/2026.10.1/homeassistant/components/homekit/climate_base.py)
 
 ### 串口
 
@@ -112,7 +121,7 @@ config apply
 
 安装指定核心和依赖后，可编译 `Software/HomeGear`，FQBN 为 `esp32:esp32:esp32`。模块开关由 `HomeGearConfig.h` 配置；当前默认启用温湿度/光照、空气质量、红外和 ZigBee，与实机模组一致。
 
-原生 C++11 测试核对实测 ON/OFF 帧、捕获温度字段、严格温度解析与取整、串口配置、传感器快照/限流、部分读写和背压、配网门户回收条件，以及临时 CPU 时钟恢复。SensorService 和 IrService 集成测试执行真实服务与锁定 ArduinoJson 序列化器，使用模拟硬件和 MQTT 驱动；后者还核对未知状态不发红外、开关保留目标、发送期间入队、拒绝 retained/分片消息以及 Discovery 空室温定义：
+原生 C++11 测试核对实测 ON/OFF 帧、捕获温度字段、严格温度解析与取整、串口配置、传感器快照/限流、部分读写和背压、配网门户回收条件，以及临时 CPU 时钟恢复。SensorService 和 IrService 集成测试执行真实服务与锁定 ArduinoJson 序列化器，使用模拟硬件和 MQTT 驱动；覆盖未知电源状态不发红外、开关保留目标、发送期间入队、拒绝 retained/分片消息，以及室温来源与独立 Discovery 主题。室温测试另覆盖无模组、CRC/硬件故障、NaN、合法 0℃、过期、计时回绕、恢复、限流、重连和发布重试：
 
 ```sh
 tests/run-host-tests.sh

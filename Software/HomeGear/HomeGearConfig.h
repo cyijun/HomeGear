@@ -15,7 +15,7 @@
 #define DEVICE_MODEL "HomeGear Scalable Hardware Stack"
 #endif
 #ifndef SOFTWARE_VERSION
-#define SOFTWARE_VERSION "HomeGear 1.2"
+#define SOFTWARE_VERSION "HomeGear 1.3"
 #endif
 
 #ifndef THI_MODULE
