@@ -9,6 +9,7 @@
 #include "HAMDHandler.h"
 #include "HomeGearConfig.h"
 #include "MqttService.h"
+#include "RoomTemperature.h"
 #include "SensorSnapshot.h"
 
 #if THI_MODULE
@@ -90,12 +91,14 @@ void sampleSht(uint32_t now) {
         validReading(Field::ThTemperature, temperature) && validReading(Field::ThHumidity, humidity)) {
       publisher.update(Field::ThTemperature, temperature);
       publisher.update(Field::ThHumidity, humidity);
+      room::update(temperature, now);
       ++shtSamples;
       return;
     }
     shtReady = false;
   }
   ++shtErrors;
+  room::invalidate();
   // abortUpdate() does not call endProcess(); keep failed reads asleep too.
   shtc3.sleep(true);
 }
@@ -238,6 +241,7 @@ void publishSnapshot(uint32_t now) {
 
 void begin() {
   startedAt = millis();
+  room::reset();
   publisher = SnapshotPublisher();
   publisher.request();
   publishRequested.store(false, std::memory_order_relaxed);
@@ -286,7 +290,8 @@ void requestPublish() {
 }
 
 void tick(uint32_t now) {
-  if (publishRequested.exchange(false, std::memory_order_acq_rel)) publisher.request();
+  const bool force = publishRequested.exchange(false, std::memory_order_acq_rel);
+  if (force) publisher.request();
 #if THI_MODULE
   sampleSht(now);
   sampleLight(light1, now);
@@ -297,6 +302,7 @@ void tick(uint32_t now) {
   sampleIaq(now);
 #endif
   publishSnapshot(now);
+  room::tick(now, force);
 }
 
 void publishDiscovery(ESP32MQTTClient &client, HAMqttDiscoveryHandler &device) {
@@ -315,6 +321,11 @@ void publishDiscovery(ESP32MQTTClient &client, HAMqttDiscoveryHandler &device) {
 
 void printStatus() {
   Serial.println("SENSORS BEGIN");
+  const room::Reading currentRoom = room::reading(millis());
+  Serial.printf("SENSORS room_temperature_source=%s\nSENSORS room_temperature_max_age_ms=%lu\n",
+      currentRoom.source, static_cast<unsigned long>(room::kMaxAgeMs));
+  if (currentRoom.available) Serial.printf("SENSORS room_temperature=%.2f\n", currentRoom.celsius);
+  else Serial.println("SENSORS room_temperature=unknown");
   Serial.printf("SENSORS publish_interval_ms=%lu\nSENSORS heartbeat_ms=%lu\nSENSORS publish_attempts=%lu\nSENSORS publish_count=%lu\nSENSORS publish_failures=%lu\nSENSORS dirty=%u\n",
       static_cast<unsigned long>(kPublishIntervalMs), static_cast<unsigned long>(kHeartbeatIntervalMs),
       static_cast<unsigned long>(publishAttempts), static_cast<unsigned long>(publishSuccesses),

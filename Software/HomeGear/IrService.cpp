@@ -2,6 +2,7 @@
 #include "MqttService.h"
 #include "DeviceInfo.h"
 #include "PowerPolicy.h"
+#include "RoomTemperature.h"
 #include <ArduinoJson.h>
 #include <cstring>
 #include <freertos/FreeRTOS.h>
@@ -38,9 +39,13 @@ String hitachiAc3Feedback()
   else
     feedback["achitachi_power"] = nullptr;
   feedback["state_source"] = hitachiAc3.getStateSource();
-  // IR reports the requested setpoint, never an observed room temperature.
-  feedback["achitachi_current_temperature"] = nullptr;
-  feedback["current_temperature_source"] = "unavailable";
+  // The room reading is independent of the commanded IR target and power.
+  const auto room = sensors::room::reading(millis());
+  if (room.available)
+    feedback["achitachi_current_temperature"] = room.celsius;
+  else
+    feedback["achitachi_current_temperature"] = nullptr;
+  feedback["current_temperature_source"] = room.available ? room.source : "unavailable";
   String payload;
   serializeJson(feedback, payload);
   return payload;
@@ -196,11 +201,11 @@ void onConnected() {
     discovery["name"] = "Hitachi AC3 Dry";
     discovery["initial"] = static_cast<int>(HitachiAc3Control::kDefaultTemperature);
     discovery["temp_step"] = 1;
-    discovery["precision"] = 1.0;
+    discovery["precision"] = 0.1;
     discovery["optimistic"] = false;
-    discovery["current_temperature_topic"] = hamdhHitachi.getStateTopic();
-    // HA resets on the literal 'None'; an empty string or 'null' is ignored.
-    discovery["current_temperature_template"] = "{{ 'None' }}";
+    // Sensor updates only this retained topic; they never enqueue IR actions.
+    discovery["current_temperature_topic"] = sensors::room::topic();
+    discovery["current_temperature_template"] = "{{ value }}";
     String payload;
     if (!discovery.overflowed() && serializeJson(discovery, payload))
       mqttClient.publish(hamdhHitachiAC.getMqttDiscoveryConfigTopic(), payload, 0, true);

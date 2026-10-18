@@ -1,7 +1,9 @@
 // Runs the real IR service, control parser/encoder and pinned JSON serializer.
-// Only queues, MQTT transport, HA helper, clock and IR hardware are substituted.
+// Only queues, MQTT transport, HA helper, room sensor, clock and IR hardware are
+// substituted; SensorService and its room-temperature lifecycle are tested separately.
 #include "../Software/HomeGear/IrService.cpp"
 #include <cassert>
+#include <cmath>
 #include <iostream>
 
 MockSerial Serial;
@@ -11,6 +13,22 @@ bool clockReady = true;
 unsigned clockDepth = 0;
 unsigned clockUses = 0;
 }
+namespace room_mock {
+bool available = false;
+float celsius = 0;
+uint32_t lastReadAt = 0;
+unsigned readCalls = 0;
+}
+namespace homegear { namespace sensors { namespace room {
+Reading reading(uint32_t now) {
+  room_mock::lastReadAt = now;
+  ++room_mock::readCalls;
+  const Reading result = {room_mock::available, room_mock::celsius,
+      room_mock::available ? "shtc3" : "unavailable"};
+  return result;
+}
+String topic() { return String("homegear/TESTCHIP/room_temperature"); }
+}}}
 namespace homegear { namespace mqtt {
 ESP32MQTTClient &client() { static ESP32MQTTClient client; return client; }
 HAMqttDiscoveryHandler &discovery() { static HAMqttDiscoveryHandler device; return device; }
@@ -63,6 +81,31 @@ static void checkFrame(bool on, int target) {
   assert(frame[22] == static_cast<uint8_t>(~frame[21]));
 }
 
+static StaticJsonDocument<512> serialState() {
+  Serial.output.clear();
+  homegear::ir::printStatus();
+  StaticJsonDocument<512> result;
+  assert(!deserializeJson(result, Serial.output));
+  return result;
+}
+
+static void checkRoomSnapshot(const StaticJsonDocument<512> &snapshot,
+                              bool available, float celsius) {
+  assert(snapshot["achitachi_mode"].as<std::string>() == "dry");
+  assert(snapshot["achitachi_power"].as<bool>());
+  assert(snapshot["achitachi_temperature"].as<int>() == 20);
+  assert(snapshot["state_source"].as<std::string>() == "commanded");
+  assert(snapshot.containsKey("achitachi_current_temperature"));
+  if (available) {
+    assert(snapshot["achitachi_current_temperature"].is<float>());
+    assert(std::fabs(snapshot["achitachi_current_temperature"].as<float>() - celsius) < 0.001f);
+    assert(snapshot["current_temperature_source"].as<std::string>() == "shtc3");
+  } else {
+    assert(snapshot["achitachi_current_temperature"].isNull());
+    assert(snapshot["current_temperature_source"].as<std::string>() == "unavailable");
+  }
+}
+
 int main() {
   using namespace homegear::ir;
   auto &transport = homegear::mqtt::client();
@@ -80,11 +123,16 @@ int main() {
       assert(!deserializeJson(discovery, message.payload));
       assert(discovery["min_temp"].as<int>() == 17 && discovery["max_temp"].as<int>() == 30);
       assert(discovery["initial"].as<int>() == 25);
-      assert(discovery["temp_step"].as<int>() == 1 && discovery["precision"].as<int>() == 1);
+      assert(discovery["temp_step"].as<int>() == 1);
+      assert(std::fabs(discovery["precision"].as<float>() - 0.1f) < 0.001f);
       assert(discovery.containsKey("optimistic") && !discovery["optimistic"].as<bool>());
-      assert(discovery.containsKey("current_temperature_topic"));
-      assert(discovery["current_temperature_template"].as<std::string>().find("None") != std::string::npos);
+      assert(discovery["current_temperature_topic"].as<std::string>() == homegear::sensors::room::topic().c_str());
+      assert(discovery["current_temperature_template"].as<std::string>() == "{{ value }}");
+      assert(discovery["mode_cmd_t"].as<std::string>() == "homegear_ir/TESTCHIP_hitachi_ac3/ctrl");
+      assert(discovery["mode_stat_t"].as<std::string>() == "homegear_ir/TESTCHIP_hitachi_ac3/state");
+      assert(discovery["current_temperature_topic"].as<std::string>() != discovery["mode_stat_t"].as<std::string>());
       initialDiscoveryTopic = message.topic;
+      assert(initialDiscoveryTopic == "homeassistant/climate/hitachi_ac3_25c_dry/config");
       discoverySeen = true;
     }
   }
@@ -95,6 +143,7 @@ int main() {
   assert(snapshot["achitachi_power"].isNull());
   assert(snapshot["achitachi_temperature"].as<int>() == 25);
   assert(snapshot.containsKey("achitachi_current_temperature") && snapshot["achitachi_current_temperature"].isNull());
+  assert(snapshot["current_temperature_source"].as<std::string>() == "unavailable");
   assert(snapshot["state_source"].as<std::string>() == "unknown");
   assert(output.frames.empty() && ir_mock::clockUses == 0);
 
@@ -218,5 +267,44 @@ int main() {
   assert(reconnectDiscoverySeen);
   assert(state()["achitachi_mode"].as<std::string>() == "off");
   assert(state()["achitachi_temperature"].as<int>() == 21);
+
+  // A room sensor is observation only: updating its value and exposing fresh
+  // MQTT/serial snapshots must never issue a setpoint or power command.
+  assert(temperature(20)); tick(); checkFrame(false, 20);
+  assert(command(true)); tick(); checkFrame(true, 20);
+  const size_t beforeRoomObservations = output.frames.size();
+  const unsigned beforeRoomClockUses = ir_mock::clockUses;
+  for (float reading : {23.75f, 0.0f}) {
+    room_mock::available = true;
+    room_mock::celsius = reading;
+    ir_mock::now += 2000;
+    checkRoomSnapshot(serialState(), true, reading);
+    assert(room_mock::lastReadAt == ir_mock::now);
+    onConnected(); tick();
+    checkRoomSnapshot(state(), true, reading);
+    assert(room_mock::lastReadAt == ir_mock::now);
+    assert(output.frames.size() == beforeRoomObservations);
+    assert(ir_mock::clockUses == beforeRoomClockUses && ir_mock::clockDepth == 0);
+  }
+
+  // Loss of the sensor removes the last observed temperature instead of
+  // reusing a stale value, synthesizing a target, or changing AC power.
+  room_mock::available = false;
+  room_mock::celsius = 23.75f; // A stale numeric cache must not leak into feedback.
+  ir_mock::now += 2000;
+  checkRoomSnapshot(serialState(), false, 0);
+  onConnected(); tick();
+  checkRoomSnapshot(state(), false, 0);
+  assert(output.frames.size() == beforeRoomObservations);
+  assert(ir_mock::clockUses == beforeRoomClockUses && ir_mock::clockDepth == 0);
+  assert(room_mock::readCalls > 0 && room_mock::lastReadAt == ir_mock::now);
+  for (const auto &message : transport.messages) {
+    if (message.topic.find("/config") == std::string::npos) continue;
+    assert(message.topic == initialDiscoveryTopic);
+    StaticJsonDocument<4096> discovery;
+    assert(!deserializeJson(discovery, message.payload));
+    assert(discovery["current_temperature_topic"].as<std::string>() == homegear::sensors::room::topic().c_str());
+    assert(discovery["current_temperature_template"].as<std::string>() == "{{ value }}");
+  }
   std::cout << "ir_service_mock_test: PASS\n";
 }
